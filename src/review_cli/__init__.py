@@ -236,8 +236,9 @@ def scan(
     output: str = typer.Option(".review/scanner-results", "--output", "-o", help="Output directory"),
     language: str = typer.Option(None, "--lang", "-l", help="Override language detection"),
     tools: str = typer.Option("all", "--tools", "-t", help="Comma-separated tools or 'all'"),
+    auto_install: bool = typer.Option(True, "--install/--no-install", help="Auto-install missing tools"),
 ):
-    """Run integrated code scanning tools."""
+    """Run integrated code scanning tools with auto-install support."""
     show_banner()
     
     import shutil
@@ -254,17 +255,18 @@ def scan(
         language = _detect_language(target_path)
     
     console.print(f"[cyan]Language:[/cyan] {language}")
+    console.print(f"[cyan]Auto-install:[/cyan] {'enabled' if auto_install else 'disabled'}")
     console.print()
     
     # Run scanners based on language
     all_issues = []
     
     if language == "go":
-        all_issues = _run_go_scanners(target_path, output_path, tools)
+        all_issues = _run_go_scanners(target_path, output_path, tools, auto_install)
     elif language == "python":
-        all_issues = _run_python_scanners(target_path, output_path, tools)
+        all_issues = _run_python_scanners(target_path, output_path, tools, auto_install)
     elif language == "typescript":
-        all_issues = _run_typescript_scanners(target_path, output_path, tools)
+        all_issues = _run_typescript_scanners(target_path, output_path, tools, auto_install)
     else:
         console.print(f"[yellow]Warning: Scanner for '{language}' not yet implemented[/yellow]")
         return
@@ -326,27 +328,117 @@ def _detect_language(target_path: Path) -> str:
     return "unknown"
 
 
-def _run_go_scanners(target_path: Path, output_path: Path, tools_filter: str) -> List[dict]:
-    """Run Go scanning tools."""
+def _install_go_tool(tool_name: str) -> bool:
+    """Install a Go tool using go install."""
+    import subprocess
+    
+    install_commands = {
+        "staticcheck": ["go", "install", "honnef.co/go/tools/cmd/staticcheck@latest"],
+        "gosec": ["go", "install", "github.com/securego/gosec/v2/cmd/gosec@latest"],
+        "gocognit": ["go", "install", "github.com/uudashr/gocognit/cmd/gocognit@latest"],
+        "ineffassign": ["go", "install", "github.com/gordonklaus/ineffassign@latest"],
+    }
+    
+    if tool_name not in install_commands:
+        return False
+    
+    cmd = install_commands[tool_name]
+    console.print(f"[yellow]  Installing {tool_name}...[/yellow]")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            console.print(f"[green]  ✓ {tool_name} installed successfully[/green]")
+            return True
+        else:
+            console.print(f"[red]  ✗ Failed to install {tool_name}: {result.stderr}[/red]")
+            return False
+    except Exception as e:
+        console.print(f"[red]  ✗ Error installing {tool_name}: {e}[/red]")
+        return False
+
+
+def _install_python_tool(tool_name: str) -> bool:
+    """Install a Python tool using pip."""
+    import subprocess
+    
+    install_commands = {
+        "pylint": ["pip", "install", "pylint"],
+        "mypy": ["pip", "install", "mypy"],
+        "flake8": ["pip", "install", "flake8"],
+        "ruff": ["pip", "install", "ruff"],
+        "bandit": ["pip", "install", "bandit"],
+    }
+    
+    if tool_name not in install_commands:
+        return False
+    
+    cmd = install_commands[tool_name]
+    console.print(f"[yellow]  Installing {tool_name}...[/yellow]")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            console.print(f"[green]  ✓ {tool_name} installed successfully[/green]")
+            return True
+        else:
+            console.print(f"[red]  ✗ Failed to install {tool_name}: {result.stderr}[/red]")
+            return False
+    except Exception as e:
+        console.print(f"[red]  ✗ Error installing {tool_name}: {e}[/red]")
+        return False
+
+
+def _check_tool_with_install(tool_name: str, language: str, auto_install: bool = True) -> bool:
+    """Check if tool exists, optionally install if missing."""
+    import shutil
+    
+    if shutil.which(tool_name):
+        return True
+    
+    if not auto_install:
+        return False
+    
+    if language == "go":
+        return _install_go_tool(tool_name)
+    elif language == "python":
+        return _install_python_tool(tool_name)
+    
+    return False
+
+
+def _run_go_scanners(target_path: Path, output_path: Path, tools_filter: str, auto_install: bool = True) -> List[dict]:
+    """Run Go scanning tools with auto-install support."""
     import shutil
     import subprocess
     
     issues = []
     
-    # Tool configurations
+    # Tool configurations: (tool_name, display_name, cmd, severity, needs_install)
     go_tools = [
-        ("go", "build", ["go", "build", "./..."], "P0"),
-        ("go", "vet", ["go", "vet", "./..."], "P1"),
-        ("staticcheck", "staticcheck", ["staticcheck", "-f", "json", "./..."], "P1"),
-        ("gosec", "gosec", ["gosec", "-fmt", "json", "./..."], "P0"),
+        ("go", "go build", ["go", "build", "./..."], "P0", False),
+        ("go", "go vet", ["go", "vet", "./..."], "P1", False),
+        ("staticcheck", "staticcheck", ["staticcheck", "-f", "json", "./..."], "P1", True),
+        ("gosec", "gosec", ["gosec", "-fmt", "json", "./..."], "P0", True),
     ]
     
-    for tool_name, display_name, cmd, severity in go_tools:
+    # Check if Go is installed first
+    if not shutil.which("go"):
+        console.print("[red]  Go is not installed. Please install Go first.[/red]")
+        return issues
+    
+    for tool_name, display_name, cmd, severity, needs_install in go_tools:
         if tools_filter != "all" and tool_name not in tools_filter.split(","):
             continue
         
-        if not shutil.which(tool_name):
-            console.print(f"[yellow]  [{display_name}] Not installed[/yellow]")
+        # Check/install tool
+        if tool_name == "go":
+            # go is built-in, check if available
+            if not shutil.which("go"):
+                console.print(f"[red]  [{display_name}] Go not found[/red]")
+                continue
+        elif not _check_tool_with_install(tool_name, "go", auto_install):
+            console.print(f"[yellow]  [{display_name}] Not available (install failed)[/yellow]")
             continue
         
         console.print(f"[cyan]  [{display_name}] Running...[/cyan]")
@@ -405,13 +497,14 @@ def _run_go_scanners(target_path: Path, output_path: Path, tools_filter: str) ->
     return issues
 
 
-def _run_python_scanners(target_path: Path, output_path: Path, tools_filter: str) -> List[dict]:
-    """Run Python scanning tools."""
+def _run_python_scanners(target_path: Path, output_path: Path, tools_filter: str, auto_install: bool = True) -> List[dict]:
+    """Run Python scanning tools with auto-install support."""
     import shutil
     import subprocess
     
     issues = []
     
+    # Tool configurations: (tool_name, display_name, cmd_base, severity)
     py_tools = [
         ("pylint", "pylint", ["pylint", "--output-format=json"], "P1"),
         ("mypy", "mypy", ["mypy", "--output", "json"], "P1"),
@@ -420,12 +513,18 @@ def _run_python_scanners(target_path: Path, output_path: Path, tools_filter: str
         ("bandit", "bandit", ["bandit", "-f", "json", "-r"], "P0"),
     ]
     
+    # Check if Python/pip is installed
+    if not shutil.which("pip") and not shutil.which("pip3"):
+        console.print("[red]  pip is not installed. Please install Python/pip first.[/red]")
+        return issues
+    
     for tool_name, display_name, cmd_base, severity in py_tools:
         if tools_filter != "all" and tool_name not in tools_filter.split(","):
             continue
         
-        if not shutil.which(tool_name):
-            console.print(f"[yellow]  [{display_name}] Not installed[/yellow]")
+        # Check/install tool
+        if not _check_tool_with_install(tool_name, "python", auto_install):
+            console.print(f"[yellow]  [{display_name}] Not available[/yellow]")
             continue
         
         console.print(f"[cyan]  [{display_name}] Running...[/cyan]")
