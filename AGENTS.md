@@ -59,6 +59,7 @@ code-review-kit/
 | Command | Description | Output |
 |---------|-------------|--------|
 | `/codereview.config` | Initialize configuration | .review/config.yaml |
+| `/codereview.scan` | Run integrated scanning tools | scanner-results.json |
 | `/codereview.review` | Execute full review | report.md, issues.json |
 | `/codereview.analyze` | Deep analyze issue | analysis.md |
 | `/codereview.fix` | Auto-fix issues | patches |
@@ -68,20 +69,49 @@ code-review-kit/
 | `/codereview.pr` | Analyze PR/MR comments with fix/reply workflow | fixes.json, replies.json |
 | `/codereview.reply` | Send replies to PR comments | API response |
 
+## Integrated Scanning Tools
+
+### Go
+| Tool | Purpose | Tier |
+|------|---------|------|
+| go build | Compile check | P0 |
+| go vet | Static analysis | P1 |
+| staticcheck | Advanced analysis | P1 |
+| gosec | Security scanner | P0 |
+| gocognit | Complexity analysis | P2 |
+
+### Python
+| Tool | Purpose | Tier |
+|------|---------|------|
+| pylint | Code quality | P1 |
+| mypy | Type checking | P1 |
+| flake8 | Style guide | P2 |
+| ruff | Fast linter | P1 |
+| bandit | Security | P0 |
+
+### TypeScript
+| Tool | Purpose | Tier |
+|------|---------|------|
+| tsc | Type check | P0 |
+| eslint | Linter | P1 |
+
 ## PR Analysis Workflow
 
 ```
+/codereview.scan              # Run scanners first
+    ↓
 /codereview.pr owner/repo 123
     ↓
 Fetch PR + Comments
     ↓
 ┌─────────────────────────────────────┐
 │ For each comment:                    │
-│   1. Analyze if comment is correct   │
-│   2. If correct → Generate fix       │
-│      - Check why tool didn't detect  │
+│   1. Check if scanner detected it    │
+│   2. If detected → Mark as correct   │
+│      - Show scanner tool + rule      │
+│   3. If not detected → Analyze       │
+│      - Check if comment is valid     │
 │      - Suggest rule improvement      │
-│   3. If incorrect → Generate reply   │
 │   4. User selects action             │
 └─────────────────────────────────────┘
     ↓

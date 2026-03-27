@@ -231,6 +231,302 @@ def check():
 
 
 @app.command()
+def scan(
+    target: str = typer.Argument(".", help="Target directory to scan"),
+    output: str = typer.Option(".review/scanner-results", "--output", "-o", help="Output directory"),
+    language: str = typer.Option(None, "--lang", "-l", help="Override language detection"),
+    tools: str = typer.Option("all", "--tools", "-t", help="Comma-separated tools or 'all'"),
+):
+    """Run integrated code scanning tools."""
+    show_banner()
+    
+    import shutil
+    from datetime import datetime
+    
+    target_path = Path(target).resolve()
+    output_path = Path(output)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    console.print(f"[cyan]Target:[/cyan] {target_path}")
+    
+    # Detect language
+    if not language:
+        language = _detect_language(target_path)
+    
+    console.print(f"[cyan]Language:[/cyan] {language}")
+    console.print()
+    
+    # Run scanners based on language
+    all_issues = []
+    
+    if language == "go":
+        all_issues = _run_go_scanners(target_path, output_path, tools)
+    elif language == "python":
+        all_issues = _run_python_scanners(target_path, output_path, tools)
+    elif language == "typescript":
+        all_issues = _run_typescript_scanners(target_path, output_path, tools)
+    else:
+        console.print(f"[yellow]Warning: Scanner for '{language}' not yet implemented[/yellow]")
+        return
+    
+    # Aggregate and save
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    aggregated_file = output_path / f"aggregated-{timestamp}.json"
+    
+    result = {
+        "timestamp": timestamp,
+        "target": str(target_path),
+        "language": language,
+        "issues": all_issues,
+        "summary": {
+            "total": len(all_issues),
+            "errors": sum(1 for i in all_issues if i.get("severity") in ["error", "critical"]),
+            "warnings": sum(1 for i in all_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in all_issues if i.get("severity") in ["info", "note"]),
+        }
+    }
+    
+    aggregated_file.write_text(json.dumps(result, indent=2))
+    
+    # Display summary
+    console.print()
+    console.print(Panel(
+        f"Total: {result['summary']['total']}\n"
+        f"Errors: {result['summary']['errors']}\n"
+        f"Warnings: {result['summary']['warnings']}\n"
+        f"Info: {result['summary']['info']}",
+        title="Scan Results",
+        border_style="green"
+    ))
+    
+    console.print(f"\n[dim]Results saved to: {aggregated_file}[/dim]")
+    console.print("[dim]Use this file with /codereview.pr for comment validation[/dim]")
+
+
+def _detect_language(target_path: Path) -> str:
+    """Detect programming language from project structure."""
+    if (target_path / "go.mod").exists():
+        return "go"
+    if (target_path / "requirements.txt").exists() or (target_path / "pyproject.toml").exists():
+        return "python"
+    if (target_path / "build.gradle.kts").exists() or (target_path / "build.gradle").exists():
+        return "kotlin"
+    if (target_path / "package.json").exists() or (target_path / "tsconfig.json").exists():
+        return "typescript"
+    
+    # Check file extensions
+    go_count = len(list(target_path.glob("**/*.go")))
+    py_count = len(list(target_path.glob("**/*.py")))
+    ts_count = len(list(target_path.glob("**/*.ts"))) + len(list(target_path.glob("**/*.tsx")))
+    
+    counts = {"go": go_count, "python": py_count, "typescript": ts_count}
+    if max(counts.values()) > 0:
+        return max(counts, key=counts.get)
+    
+    return "unknown"
+
+
+def _run_go_scanners(target_path: Path, output_path: Path, tools_filter: str) -> List[dict]:
+    """Run Go scanning tools."""
+    import shutil
+    import subprocess
+    
+    issues = []
+    
+    # Tool configurations
+    go_tools = [
+        ("go", "build", ["go", "build", "./..."], "P0"),
+        ("go", "vet", ["go", "vet", "./..."], "P1"),
+        ("staticcheck", "staticcheck", ["staticcheck", "-f", "json", "./..."], "P1"),
+        ("gosec", "gosec", ["gosec", "-fmt", "json", "./..."], "P0"),
+    ]
+    
+    for tool_name, display_name, cmd, severity in go_tools:
+        if tools_filter != "all" and tool_name not in tools_filter.split(","):
+            continue
+        
+        if not shutil.which(tool_name):
+            console.print(f"[yellow]  [{display_name}] Not installed[/yellow]")
+            continue
+        
+        console.print(f"[cyan]  [{display_name}] Running...[/cyan]")
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=target_path,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            # Parse output
+            if result.stdout:
+                try:
+                    if tool_name == "staticcheck" or tool_name == "gosec":
+                        # JSON output
+                        for line in result.stdout.strip().split("\n"):
+                            if line.strip():
+                                try:
+                                    data = json.loads(line)
+                                    issues.append({
+                                        "tool": tool_name,
+                                        "file": data.get("location", {}).get("file", ""),
+                                        "line": data.get("location", {}).get("line", 0),
+                                        "severity": severity.lower() if severity == "P0" else "warning",
+                                        "message": data.get("message", ""),
+                                        "rule": data.get("code", data.get("rule", "")),
+                                    })
+                                except json.JSONDecodeError:
+                                    pass
+                except Exception as e:
+                    console.print(f"[yellow]  Warning: Could not parse {tool_name} output[/yellow]")
+            
+            if result.stderr and tool_name in ["go", "staticcheck"]:
+                # Parse error output for go build/vet
+                for line in result.stderr.split("\n"):
+                    if ":" in line:
+                        parts = line.split(":")
+                        if len(parts) >= 3:
+                            issues.append({
+                                "tool": tool_name,
+                                "file": parts[0].strip(),
+                                "line": int(parts[1].strip()) if parts[1].strip().isdigit() else 0,
+                                "severity": "error",
+                                "message": ":".join(parts[2:]).strip(),
+                                "rule": "",
+                            })
+        
+        except subprocess.TimeoutExpired:
+            console.print(f"[red]  [{display_name}] Timeout[/red]")
+        except Exception as e:
+            console.print(f"[red]  [{display_name}] Error: {e}[/red]")
+    
+    return issues
+
+
+def _run_python_scanners(target_path: Path, output_path: Path, tools_filter: str) -> List[dict]:
+    """Run Python scanning tools."""
+    import shutil
+    import subprocess
+    
+    issues = []
+    
+    py_tools = [
+        ("pylint", "pylint", ["pylint", "--output-format=json"], "P1"),
+        ("mypy", "mypy", ["mypy", "--output", "json"], "P1"),
+        ("flake8", "flake8", ["flake8", "--format=json"], "P2"),
+        ("ruff", "ruff", ["ruff", "check", "--output-format", "json"], "P1"),
+        ("bandit", "bandit", ["bandit", "-f", "json", "-r"], "P0"),
+    ]
+    
+    for tool_name, display_name, cmd_base, severity in py_tools:
+        if tools_filter != "all" and tool_name not in tools_filter.split(","):
+            continue
+        
+        if not shutil.which(tool_name):
+            console.print(f"[yellow]  [{display_name}] Not installed[/yellow]")
+            continue
+        
+        console.print(f"[cyan]  [{display_name}] Running...[/cyan]")
+        
+        cmd = cmd_base + [str(target_path)]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.stdout:
+                try:
+                    data = json.loads(result.stdout)
+                    if isinstance(data, list):
+                        for item in data:
+                            issues.append({
+                                "tool": tool_name,
+                                "file": item.get("path", item.get("file", "")),
+                                "line": item.get("line", item.get("lineNumber", 0)),
+                                "severity": severity.lower() if severity == "P0" else "warning",
+                                "message": item.get("message", item.get("msg", "")),
+                                "rule": item.get("code", item.get("symbol", "")),
+                            })
+                except json.JSONDecodeError:
+                    pass
+        
+        except Exception as e:
+            console.print(f"[red]  [{display_name}] Error: {e}[/red]")
+    
+    return issues
+
+
+def _run_typescript_scanners(target_path: Path, output_path: Path, tools_filter: str) -> List[dict]:
+    """Run TypeScript scanning tools."""
+    import shutil
+    import subprocess
+    
+    issues = []
+    
+    ts_tools = [
+        ("tsc", "TypeScript", ["npx", "tsc", "--noEmit", "--pretty", "false"], "P0"),
+        ("eslint", "ESLint", ["npx", "eslint", "--format", "json"], "P1"),
+    ]
+    
+    for tool_name, display_name, cmd_base, severity in ts_tools:
+        if tools_filter != "all" and tool_name not in tools_filter.split(","):
+            continue
+        
+        console.print(f"[cyan]  [{display_name}] Running...[/cyan]")
+        
+        cmd = cmd_base + [str(target_path)]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=target_path,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.stdout:
+                if tool_name == "eslint":
+                    try:
+                        data = json.loads(result.stdout)
+                        for file_result in data:
+                            for msg in file_result.get("messages", []):
+                                issues.append({
+                                    "tool": "eslint",
+                                    "file": file_result.get("filePath", ""),
+                                    "line": msg.get("line", 0),
+                                    "severity": msg.get("severity", 1) == 2 and "error" or "warning",
+                                    "message": msg.get("message", ""),
+                                    "rule": msg.get("ruleId", ""),
+                                })
+                    except json.JSONDecodeError:
+                        pass
+                else:
+                    # tsc output
+                    for line in result.stdout.split("\n"):
+                        if "error TS" in line:
+                            issues.append({
+                                "tool": "tsc",
+                                "file": "",
+                                "line": 0,
+                                "severity": "error",
+                                "message": line.strip(),
+                                "rule": "",
+                            })
+        
+        except Exception as e:
+            console.print(f"[red]  [{display_name}] Error: {e}[/red]")
+    
+    return issues
+
+
+@app.command()
 def auth(
     platform: str = typer.Option(None, "--platform", "-p", help="Platform (github, gitlab, gitee)"),
     token: str = typer.Option(None, "--token", "-t", help="API token (will prompt if not provided)"),
@@ -640,6 +936,11 @@ def _analyze_comments(comments: List[dict], pr_data: dict):
     """Analyze comments with interactive fix/reply workflow."""
     from datetime import datetime
     
+    # Load scanner results if available
+    scanner_results = _load_scanner_results()
+    if scanner_results:
+        console.print(f"[cyan]已加载 {len(scanner_results)} 条扫描结果[/cyan]\n")
+    
     # Filter actionable comments (exclude approvals and bot comments)
     actionable_keywords = ["bug", "error", "crash", "security", "vulnerability", 
                           "performance", "slow", "suggest", "consider", "should",
@@ -674,7 +975,7 @@ def _analyze_comments(comments: List[dict], pr_data: dict):
     pending_replies = []
     
     for i, comment in enumerate(actionable_comments, 1):
-        result = _process_single_comment(comment, i, len(actionable_comments))
+        result = _process_single_comment(comment, i, len(actionable_comments), scanner_results)
         if result:
             if result["action"] == "fix":
                 pending_fixes.append(result)
@@ -722,7 +1023,27 @@ def _analyze_comments(comments: List[dict], pr_data: dict):
         console.print("  2. 运行 [cyan]/codereview.reply[/cyan] 发送回复")
 
 
-def _process_single_comment(comment: dict, index: int, total: int) -> Optional[dict]:
+def _load_scanner_results() -> List[dict]:
+    """Load the most recent scanner results."""
+    scanner_dir = Path.cwd() / ".review" / "scanner-results"
+    
+    if not scanner_dir.exists():
+        return []
+    
+    # Find the most recent aggregated file
+    aggregated_files = sorted(scanner_dir.glob("aggregated-*.json"), reverse=True)
+    
+    if not aggregated_files:
+        return []
+    
+    try:
+        data = json.loads(aggregated_files[0].read_text())
+        return data.get("issues", [])
+    except Exception:
+        return []
+
+
+def _process_single_comment(comment: dict, index: int, total: int, scanner_results: Optional[List[dict]] = None) -> Optional[dict]:
     """Process a single comment interactively."""
     from rich.markdown import Markdown
     
@@ -738,8 +1059,8 @@ def _process_single_comment(comment: dict, index: int, total: int) -> Optional[d
         console.print(f"[dim]位置: {location}:{line}[/dim]")
     console.print(f"\n{body}")
     
-    # Analyze comment
-    analysis = _analyze_comment_validity(comment)
+    # Analyze comment with scanner results
+    analysis = _analyze_comment_validity(comment, scanner_results)
     
     console.print(f"\n[bold]分析结果:[/bold] {analysis['status']}")
     console.print(f"[dim]原因: {analysis['reason']}[/dim]")
@@ -816,9 +1137,37 @@ def _process_single_comment(comment: dict, index: int, total: int) -> Optional[d
     return None
 
 
-def _analyze_comment_validity(comment: dict) -> dict:
+def _find_matching_scanner_issue(comment: dict, scanner_results: List[dict]) -> Optional[dict]:
+    """Find a matching issue from scanner results for a comment."""
+    comment_path = comment.get("path", "")
+    comment_line = comment.get("line", comment.get("original_line", 0))
+    
+    for issue in scanner_results:
+        # Match by file path and line number
+        issue_file = issue.get("file", "")
+        issue_line = issue.get("line", 0)
+        
+        # Normalize paths for comparison
+        if comment_path and issue_file:
+            # Check if paths match (handle relative vs absolute)
+            comment_path_norm = comment_path.replace("\\", "/")
+            issue_file_norm = issue_file.replace("\\", "/")
+            
+            if comment_path_norm.endswith(issue_file_norm) or issue_file_norm.endswith(comment_path_norm):
+                # Check line number (allow some tolerance)
+                if abs(comment_line - issue_line) <= 2:
+                    return issue
+    
+    return None
+
+
+def _analyze_comment_validity(comment: dict, scanner_results: Optional[List[dict]] = None) -> dict:
     """
     Analyze if a comment is correct and generate solution.
+    
+    Args:
+        comment: The PR comment to analyze
+        scanner_results: Optional list of scanner issues to check against
     
     Returns:
         {
@@ -832,18 +1181,59 @@ def _analyze_comment_validity(comment: dict) -> dict:
     """
     body = comment.get("body", "").lower()
     location = comment.get("path", "")
+    line = comment.get("line", comment.get("original_line", 0))
+    
+    # Initialize scanner_results if not provided
+    if scanner_results is None:
+        scanner_results = []
+    
+    # Check if scanner detected this issue
+    scanner_match = _find_matching_scanner_issue(comment, scanner_results)
     
     # Heuristics for common patterns
     # In real implementation, this would use AI to analyze
     
     # Security issues - usually correct
     if any(kw in body for kw in ["sql injection", "xss", "vulnerability", "security"]):
-        return {
-            "is_correct": True,
-            "status": "✅ 评论正确",
-            "reason": "安全问题是真实存在的，需要进行修复",
-            "solution_preview": "使用参数化查询/输入验证/转义处理",
-            "solution": f"""## 修复方案
+        if scanner_match:
+            return {
+                "is_correct": True,
+                "status": "✅ 评论正确 (工具已检测)",
+                "reason": f"安全问题是真实存在的，工具 [{scanner_match.get('tool', 'unknown')}] 已检测到此问题",
+                "solution_preview": "使用参数化查询/输入验证/转义处理",
+                "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 工具检测结果
+- 工具: {scanner_match.get('tool', 'unknown')}
+- 规则: {scanner_match.get('rule', 'N/A')}
+- 严重程度: {scanner_match.get('severity', 'unknown')}
+
+### 修复建议
+使用安全的编码实践修复此安全问题。
+
+### 代码修改
+```diff
+- // 存在安全问题的代码
++ // 修复后的代码
+```
+""",
+                "tool_check": {
+                    "detected": True,
+                    "tool": scanner_match.get("tool"),
+                    "rule": scanner_match.get("rule"),
+                    "reason": "工具已检测到此问题"
+                }
+            }
+        else:
+            return {
+                "is_correct": True,
+                "status": "✅ 评论正确",
+                "reason": "安全问题是真实存在的，需要进行修复",
+                "solution_preview": "使用参数化查询/输入验证/转义处理",
+                "solution": f"""## 修复方案
 
 ### 问题
 {comment.get('body', '')}
@@ -858,24 +1248,50 @@ def _analyze_comment_validity(comment: dict) -> dict:
 ```
 
 ### 工具自检
-- 当前规则库可能未包含此模式检测
+- 当前工具未检测到此问题
 - 建议新增安全规则以自动检测此类问题
 """,
-            "tool_check": {
-                "detected": False,
-                "reason": "当前规则库未包含此模式",
-                "suggestion": "新增 SEC 规则"
+                "tool_check": {
+                    "detected": False,
+                    "reason": "当前工具未包含此模式检测",
+                    "suggestion": "新增安全扫描规则或使用专用安全工具 (gosec, bandit)"
+                }
             }
-        }
     
     # Performance issues - usually correct
     if any(kw in body for kw in ["n+1", "slow", "performance", "optimize"]):
-        return {
-            "is_correct": True,
-            "status": "✅ 评论正确",
-            "reason": "性能问题确实存在，优化可以提升系统性能",
-            "solution_preview": "优化查询/添加索引/使用缓存",
-            "solution": f"""## 修复方案
+        if scanner_match:
+            return {
+                "is_correct": True,
+                "status": "✅ 评论正确 (工具已检测)",
+                "reason": f"性能问题确实存在，工具 [{scanner_match.get('tool', 'unknown')}] 已检测到",
+                "solution_preview": "优化查询/添加索引/使用缓存",
+                "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 工具检测结果
+- 工具: {scanner_match.get('tool', 'unknown')}
+- 规则: {scanner_match.get('rule', 'N/A')}
+
+### 修复建议
+优化代码以提升性能。
+""",
+                "tool_check": {
+                    "detected": True,
+                    "tool": scanner_match.get("tool"),
+                    "rule": scanner_match.get("rule"),
+                    "reason": "工具已检测到此问题"
+                }
+            }
+        else:
+            return {
+                "is_correct": True,
+                "status": "✅ 评论正确",
+                "reason": "性能问题确实存在，优化可以提升系统性能",
+                "solution_preview": "优化查询/添加索引/使用缓存",
+                "solution": f"""## 修复方案
 
 ### 问题
 {comment.get('body', '')}
@@ -884,31 +1300,58 @@ def _analyze_comment_validity(comment: dict) -> dict:
 优化代码以提升性能。
 
 ### 工具自检
-- 检查是否有 PERF 规则检测此模式
-- 可能需要添加性能分析规则
+- 静态分析工具未检测到此性能问题
+- 性能问题通常需要运行时分析或专门的性能工具
 """,
-            "tool_check": {
-                "detected": False,
-                "reason": "性能问题需要运行时分析",
-                "suggestion": "添加静态分析规则"
+                "tool_check": {
+                    "detected": False,
+                    "reason": "性能问题需要运行时分析",
+                    "suggestion": "考虑使用性能分析工具 (pprof, py-spy)"
+                }
             }
-        }
     
-    # Style/Naming issues - may be incorrect depending on conventions
+    # Style/Naming issues - check against scanner results
     if any(kw in body for kw in ["naming", "style", "format", "indent"]):
-        # Check if it's a valid style issue
-        # This is where we'd check against language conventions
-        return {
-            "is_correct": False,
-            "status": "❌ 评论不正确",
-            "reason": "命名风格符合当前语言/项目的规范，评论者的建议不适用",
-            "solution_preview": "解释当前命名符合规范，提供参考文档",
-            "solution": f"""## 回复方案
+        if scanner_match:
+            # Scanner detected a style issue - it's valid
+            return {
+                "is_correct": True,
+                "status": "✅ 评论正确 (工具已检测)",
+                "reason": f"代码风格问题确实存在，工具 [{scanner_match.get('tool', 'unknown')}] 已检测到",
+                "solution_preview": "根据工具建议修复风格问题",
+                "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 工具检测结果
+- 工具: {scanner_match.get('tool', 'unknown')}
+- 规则: {scanner_match.get('rule', 'N/A')}
+
+### 修复建议
+根据工具和评论者的建议修复风格问题。
+""",
+                "tool_check": {
+                    "detected": True,
+                    "tool": scanner_match.get("tool"),
+                    "rule": scanner_match.get("rule"),
+                    "reason": "工具已检测到此问题"
+                }
+            }
+        else:
+            # No scanner match - could be a matter of preference
+            return {
+                "is_correct": False,
+                "status": "❌ 评论不正确",
+                "reason": "命名风格符合当前语言/项目的规范，评论者的建议不适用",
+                "solution_preview": "解释当前命名符合规范，提供参考文档",
+                "solution": f"""## 回复方案
 
 ### 为什么评论不正确
 感谢您的审查！关于命名规范的问题：
 
 根据项目的编码规范，当前命名方式是正确的。
+工具扫描也未发现风格问题。
 
 ### 支持证据
 - 项目编码规范文档
