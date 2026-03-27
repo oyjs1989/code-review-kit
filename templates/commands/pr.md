@@ -1,9 +1,12 @@
 ---
-description: Analyze pull/merge request comments and provide actionable insights
+description: Analyze pull/merge request comments, validate correctness, and provide fix or reply solutions
 handoffs:
-  - label: Fix Issues
+  - label: Apply Fix
     agent: codereview.fix
-    prompt: Generate fixes for identified issues
+    prompt: Apply the selected fix solution
+  - label: Reply to Comment
+    agent: codereview.reply
+    prompt: Reply to the comment on the PR
 scripts:
   sh: scripts/bash/analyze-pr.sh "{ARGS}"
   ps: scripts/powershell/analyze-pr.ps1 "{ARGS}"
@@ -29,215 +32,346 @@ Load authentication from:
 2. Config file (`.review/auth.yaml`)
 3. Prompt user if not configured
 
-```bash
-# Check for token
-if [ -z "$GITHUB_TOKEN" ] && [ ! -f ".review/auth.yaml" ]; then
-    echo "Error: No authentication configured"
-    echo "Run '/codereview.auth' to configure or set GITHUB_TOKEN environment variable"
-    exit 1
-fi
-```
-
 ### 2. Detect Platform
 
-From git remote:
-```bash
-git remote get-url origin
-# github.com -> GitHub API
-# gitlab.com -> GitLab API
-# gitee.com -> Gitee API
-```
+From git remote URL.
 
 ## Workflow
 
 ### Step 1: Fetch PR Information
 
-**GitHub API:**
-```bash
-curl -H "Authorization: token $GITHUB_TOKEN" \
-  "https://api.github.com/repos/$OWNER/$REPO/pulls/$PR_NUMBER"
-```
+Fetch PR details including:
+- Title, description, author
+- Changed files and diffs
+- Review status
 
-**GitLab API:**
-```bash
-curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-  "https://gitlab.com/api/v4/projects/$PROJECT_ID/merge_requests/$MR_IID"
-```
-
-### Step 2: Fetch PR Comments
+### Step 2: Fetch All Comments
 
 Fetch all comment types:
 - **Review Comments** - Code-level comments on specific lines
 - **Issue Comments** - General PR comments
-- **Commit Comments** - Comments on specific commits
-- **Review Summaries** - Approve/Request Changes comments
+- **Reviews** - Approve/Request Changes summaries
 
-```json
-// Example response structure
-{
-  "review_comments": [...],
-  "issue_comments": [...],
-  "reviews": [...]
-}
+### Step 3: Analyze Each Comment
+
+For each actionable comment:
+
+```python
+# 分析流程
+def analyze_comment(comment, code_context, diff):
+    # 1. 理解评论内容
+    comment_intent = understand_comment(comment.body)
+    
+    # 2. 获取相关代码上下文
+    relevant_code = get_code_context(comment.location, diff)
+    
+    # 3. 验证评论是否正确
+    validation = validate_comment(comment_intent, relevant_code)
+    
+    if validation.is_correct:
+        # 评论正确，生成修复方案
+        return {
+            "status": "CORRECT",
+            "solution": generate_fix_solution(comment, relevant_code),
+            "reason": validation.reason
+        }
+    else:
+        # 评论错误，生成回复方案
+        return {
+            "status": "INCORRECT", 
+            "solution": generate_reply_solution(comment, validation.reason),
+            "reason": validation.reason
+        }
 ```
 
-### Step 3: Parse and Categorize Comments
+### Step 4: Comment Validation Logic
 
-Categorize comments by type:
+**判断评论是否正确：**
 
-| Category | Patterns | Examples |
-|----------|----------|----------|
-| Bug Report | "bug", "error", "crash", "broken" | "This will crash if input is null" |
-| Security | "security", "vulnerability", "injection" | "SQL injection risk here" |
-| Performance | "slow", "optimize", "performance" | "N+1 query problem" |
-| Style | "style", "naming", "format" | "Use camelCase for variables" |
-| Suggestion | "suggest", "consider", "could" | "Consider using a map instead" |
-| Question | "?", "why", "how" | "Why did you use this approach?" |
-| Approval | "LGTM", "looks good", "approved" | "LGTM!" |
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Comment Validation                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  输入：评论内容 + 代码上下文 + Diff                          │
+│                                                              │
+│  分析维度：                                                   │
+│  1. 理解评论意图（指出什么问题）                              │
+│  2. 检查代码是否确实存在该问题                                │
+│  3. 验证问题的影响范围                                       │
+│                                                              │
+│  验证方法：                                                   │
+│  - 静态分析：代码逻辑检查                                     │
+│  - 上下文分析：考虑业务场景                                   │
+│  - 最佳实践对比：参考行业标准                                 │
+│                                                              │
+│  输出：                                                       │
+│  - CORRECT: 评论正确，问题确实存在                           │
+│  - INCORRECT: 评论错误，问题不存在或理解有误                 │
+│  - NEEDS_CLARIFICATION: 需要更多信息                         │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### Step 4: Identify Actionable Items
+### Step 5: Generate Solutions
 
-Filter comments that require action:
-- Comments with code suggestions
-- Comments requesting changes
-- Comments marked as unresolved
-- Comments with specific severity indicators
+#### 如果评论正确 → 生成修复方案
 
-### Step 5: AI Analysis
+```markdown
+## 修复方案
 
-For each actionable comment, use AI to:
-1. Understand the context
-2. Validate if comment is valid
-3. Generate fix suggestion
-4. Estimate effort
+### 问题分析
+评论者指出的问题是正确的：[问题描述]
 
-### Step 6: Generate Report
+### 修复建议
+```diff
+- // 原代码
++ // 修复后代码
+```
+
+### 影响范围
+- 影响文件: file.go
+- 影响行数: 45-50
+- 测试建议: 添加单元测试验证修复
+
+### 工具自检
+问题：为什么 Code Review Kit 没有自动检测出这个问题？
+
+检查项：
+- [ ] 是否有对应规则？→ 规则 ID: XXX-NNN (存在/不存在)
+- [ ] 规则是否启用？→ 是/否
+- [ ] 规则是否匹配？→ 匹配/不匹配（原因）
+- [ ] 是否是假阳性？→ 是/否
+
+如果工具未检测到，需要：
+1. 创建新规则 / 更新现有规则
+2. 调整规则优先级
+3. 更新工具链配置
+```
+
+#### 如果评论错误 → 生成回复方案
+
+```markdown
+## 回复方案
+
+### 为什么评论不正确
+[详细解释为什么代码没有问题，或者评论者理解有误]
+
+### 回复草稿
+> 感谢您的审查！关于您提到的 [问题]，
+> 
+> [解释原因]
+> 
+> [提供支持证据：文档链接、测试结果、设计说明等]
+
+### 代码说明
+```go
+// 这段代码的设计考虑了以下因素：
+// 1. ...
+// 2. ...
+// 因此 [评论中的问题] 在这个场景下不适用。
+```
+
+### 建议
+- [ ] 直接使用此回复
+- [ ] 修改后回复
+- [ ] 补充更多信息
+```
+
+### Step 6: User Interaction
+
+对每个评论，让用户选择：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Comment #1: SQL Injection Risk                              │
+│ Status: CORRECT (评论正确)                                   │
+├─────────────────────────────────────────────────────────────┤
+│ 评论内容: This query is vulnerable to SQL injection...      │
+│                                                             │
+│ 修复方案:                                                    │
+│ - 使用参数化查询替代字符串拼接                               │
+│ - 影响文件: service/user.go:45                              │
+│                                                             │
+│ 工具自检:                                                    │
+│ - 当前无对应规则检测此问题                                   │
+│ - 建议新增规则: SEC-001 (SQL Injection)                     │
+├─────────────────────────────────────────────────────────────┤
+│ 请选择操作:                                                  │
+│ [1] 应用修复方案                                             │
+│ [2] 查看工具自检详情                                         │
+│ [3] 跳过此评论                                               │
+│ [4] 标记为需要讨论                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Step 7: Fix Flow (用户选择修复)
+
+```
+用户选择修复
+    ↓
+检查为什么 CR 工具没检测到
+    ↓
+┌─────────────────────────────────┐
+│ 情况 A: 规则不存在              │
+│ → 创建新规则                    │
+│ → 更新规则库                    │
+└─────────────────────────────────┘
+    ↓
+┌─────────────────────────────────┐
+│ 情况 B: 规则存在但未启用        │
+│ → 启用规则                      │
+│ → 更新配置                      │
+└─────────────────────────────────┘
+    ↓
+┌─────────────────────────────────┐
+│ 情况 C: 规则存在但未匹配        │
+│ → 分析未匹配原因                │
+│ → 更新规则模式                  │
+└─────────────────────────────────┘
+    ↓
+应用修复
+    ↓
+验证修复（运行测试）
+    ↓
+生成 commit message
+```
+
+### Step 8: Reply Flow (用户选择回复)
+
+```
+用户选择回复
+    ↓
+生成回复内容
+    ↓
+用户确认/修改回复
+    ↓
+通过 API 发布回复
+    ↓
+记录回复内容
+```
 
 ## Output Format
 
+### PR Analysis Summary
+
 ```markdown
-# PR Analysis Report
+# PR 分析报告
 
-## PR Information
-- **Repository**: owner/repo
-- **PR Number**: #123
-- **Title**: Add user authentication
-- **Author**: @developer
-- **Status**: Open
-- **Created**: 2026-03-27
+## PR 信息
+- **仓库**: owner/repo
+- **PR**: #123 - Add user authentication
+- **作者**: @developer
+- **评论数**: 8 条
 
-## Comment Summary
+## 评论分析汇总
 
-| Category | Count | Actionable |
-|----------|-------|------------|
-| Bug Report | 3 | 3 |
-| Security | 2 | 2 |
-| Performance | 1 | 1 |
-| Style | 5 | 2 |
-| Suggestion | 8 | 4 |
-| Question | 3 | 0 |
-| Approval | 2 | 0 |
+| # | 评论者 | 类型 | 状态 | 操作 |
+|---|--------|------|------|------|
+| 1 | @reviewer | Bug | ✅ 正确 | 待修复 |
+| 2 | @reviewer | Security | ✅ 正确 | 待修复 |
+| 3 | @senior | Question | ℹ️ 需回复 | 待回复 |
+| 4 | @reviewer | Style | ❌ 不正确 | 待回复 |
+| 5 | @lead | Approval | ✅ 已批准 | - |
 
-## Actionable Comments
+## 需要处理的问题
 
-### P0: Security Issue - SQL Injection Risk
-**Comment by**: @reviewer
-**Location**: `service/user.go:45`
-**Original Comment**:
-> This query is vulnerable to SQL injection. User input should be parameterized.
+### P0: [修复] SQL 注入风险
+**状态**: 评论正确，需要修复
+**位置**: `service/user.go:45`
+**评论者**: @reviewer
 
-**Code Context**:
-```go
-query := fmt.Sprintf("SELECT * FROM users WHERE id = %s", userId)
+**问题**: 字符串拼接构造 SQL 存在注入风险
+
+**修复方案**:
+```diff
+- query := fmt.Sprintf("SELECT * FROM users WHERE id = %s", userId)
++ stmt := db.Prepare("SELECT * FROM users WHERE id = ?")
++ rows, err := stmt.Query(userId)
 ```
 
-**Suggested Fix**:
-```go
-stmt := db.Prepare("SELECT * FROM users WHERE id = ?")
-rows, err := stmt.Query(userId)
-```
+**工具自检结果**:
+- 当前无规则检测此问题
+- 建议新增规则: `SEC-001-sql-injection`
+- 规则类别: Security
+- 严重程度: P0
+
+**选择**: [应用修复] [查看详情] [跳过]
 
 ---
 
-### P1: Bug - Nil Pointer Dereference
-**Comment by**: @reviewer
-**Location**: `handler/user.go:102`
-**Original Comment**:
-> user.Profile could be nil here, need to add nil check.
+### P1: [回复] 命名规范问题
+**状态**: 评论不正确，需要回复
+**位置**: `handler/user.go:102`
+**评论者**: @reviewer
 
-**Code Context**:
-```go
-return user.Profile.Name
-```
+**评论内容**: 变量名应该使用下划线命名法
 
-**Suggested Fix**:
-```go
-if user.Profile == nil {
-    return ""
-}
-return user.Profile.Name
-```
+**为什么不正确**:
+Go 语言官方规范推荐使用驼峰命名法（camelCase），而非下划线命名法。
+参考: [Go Code Review Comments - naming](https://github.com/golang/go/wiki/CodeReviewComments#initialisms)
+
+**回复方案**:
+> 感谢您的审查！关于命名规范的问题，
+> 
+> 根据 Go 官方代码审查建议，Go 语言推荐使用驼峰命名法而非下划线命名法。
+> 参考: https://github.com/golang/go/wiki/CodeReviewComments
+> 
+> `userId` 符合 Go 的命名惯例，暂时不做修改。
+
+**选择**: [发送回复] [编辑回复] [跳过]
 
 ---
 
-## Unresolved Questions
+## 处理进度
+- [ ] 修复 #1: SQL 注入风险
+- [ ] 回复 #4: 命名规范问题
+- [ ] 回答 #3: 技术问题
 
-1. **@reviewer** asked: "Why use Redis instead of Memcached?"
-   - Location: `config/cache.go:15`
-   - Need to respond or clarify
+## 工具改进建议
+本次分析发现以下工具改进机会：
 
-2. **@reviewer** asked: "Is this rate limit sufficient for production?"
-   - Location: `middleware/rate_limit.go:30`
-   - Need to discuss with team
-
-## Approved By
-- @senior-dev (LGTM)
-- @tech-lead (Approved with minor suggestions)
-
-## Next Steps
-1. [ ] Fix P0 security issue (SQL injection)
-2. [ ] Fix P1 bug (nil pointer)
-3. [ ] Respond to unresolved questions
-4. [ ] Address style suggestions (optional)
+| 规则 ID | 类别 | 说明 | 优先级 |
+|---------|------|------|--------|
+| SEC-001 | Security | SQL 注入检测 | P0 |
+| SEC-002 | Security | XSS 检测 | P1 |
 ```
 
-## API Integration Details
+## API Integration
 
-### GitHub API Endpoints
+### GitHub API
 
 ```
+# 获取 PR 信息
 GET /repos/{owner}/{repo}/pulls/{pull_number}
+
+# 获取评论
 GET /repos/{owner}/{repo}/pulls/{pull_number}/comments
-GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews
 GET /repos/{owner}/{repo}/issues/{issue_number}/comments
+
+# 发布回复
+POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
+POST /repos/{owner}/{repo}/issues/{issue_number}/comments
 ```
 
-### GitLab API Endpoints
+### GitLab API
 
 ```
+# 获取 MR 信息
 GET /projects/:id/merge_requests/:merge_request_iid
-GET /projects/:id/merge_requests/:merge_request_iid/notes
+
+# 获取讨论
 GET /projects/:id/merge_requests/:merge_request_iid/discussions
+
+# 发布回复
+POST /projects/:id/merge_requests/:merge_request_iid/discussions/:discussion_id/notes
 ```
-
-### Rate Limiting
-
-Handle API rate limits gracefully:
-- GitHub: 5000 requests/hour (authenticated)
-- GitLab: 2000 requests/minute
-- Implement exponential backoff
-- Cache responses when possible
 
 ## Environment Variables
 
 ```bash
-# GitHub
+# 认证
 GITHUB_TOKEN=ghp_xxxx
-
-# GitLab
 GITLAB_TOKEN=glpat-xxxx
-GITLAB_HOST=gitlab.com  # optional, for self-hosted
-
-# Gitee
 GITEE_TOKEN=xxxx
 ```

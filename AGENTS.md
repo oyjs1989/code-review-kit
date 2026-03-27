@@ -65,7 +65,29 @@ code-review-kit/
 | `/codereview.report` | Generate formatted report | html/md/json |
 | `/codereview.learn` | Learn from history | config updates |
 | `/codereview.auth` | Configure authentication | .review/auth.yaml |
-| `/codereview.pr` | Analyze PR/MR comments | pr-analysis.json |
+| `/codereview.pr` | Analyze PR/MR comments with fix/reply workflow | fixes.json, replies.json |
+| `/codereview.reply` | Send replies to PR comments | API response |
+
+## PR Analysis Workflow
+
+```
+/codereview.pr owner/repo 123
+    ↓
+Fetch PR + Comments
+    ↓
+┌─────────────────────────────────────┐
+│ For each comment:                    │
+│   1. Analyze if comment is correct   │
+│   2. If correct → Generate fix       │
+│      - Check why tool didn't detect  │
+│      - Suggest rule improvement      │
+│   3. If incorrect → Generate reply   │
+│   4. User selects action             │
+└─────────────────────────────────────┘
+    ↓
+Save pending fixes → /codereview.fix
+Save pending replies → /codereview.reply
+```
 
 ## Supported Platforms for PR Analysis
 

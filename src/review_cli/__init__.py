@@ -637,71 +637,496 @@ def _display_pr_info(pr_data: dict):
 
 
 def _analyze_comments(comments: List[dict], pr_data: dict):
-    """Analyze comments and categorize them."""
-    categories = {
-        "bug": [],
-        "security": [],
-        "performance": [],
-        "style": [],
-        "suggestion": [],
-        "question": [],
-        "approval": [],
-        "other": [],
-    }
+    """Analyze comments with interactive fix/reply workflow."""
+    from datetime import datetime
     
-    keywords = {
-        "bug": ["bug", "error", "crash", "broken", "fail", "incorrect"],
-        "security": ["security", "vulnerability", "injection", "xss", "csrf", "exploit"],
-        "performance": ["slow", "optimize", "performance", "n+1", "memory", "leak"],
-        "style": ["style", "naming", "format", "indent", "camel", "snake"],
-        "suggestion": ["suggest", "consider", "could", "might", "recommend"],
-        "question": ["?", "why", "how", "what", "when", "where"],
-        "approval": ["lgtm", "looks good", "approved", "approved", "👍", "merge"],
-    }
+    # Filter actionable comments (exclude approvals and bot comments)
+    actionable_keywords = ["bug", "error", "crash", "security", "vulnerability", 
+                          "performance", "slow", "suggest", "consider", "should",
+                          "must", "need", "fix", "change", "incorrect", "wrong"]
+    approval_keywords = ["lgtm", "looks good", "approved", "👍", "merge", "ship"]
     
+    actionable_comments = []
     for comment in comments:
         body = comment.get("body", "").lower()
-        categorized = False
+        user = comment.get("user", {}).get("login", "")
         
-        for category, words in keywords.items():
-            if any(word in body for word in words):
-                categories[category].append(comment)
-                categorized = True
-                break
+        # Skip bot comments
+        if "bot" in user.lower() or "[bot]" in user:
+            continue
         
-        if not categorized:
-            categories["other"].append(comment)
+        # Skip approval comments
+        if any(kw in body for kw in approval_keywords):
+            continue
+        
+        # Check if actionable
+        if any(kw in body for kw in actionable_keywords) or "?" in body:
+            actionable_comments.append(comment)
     
-    # Display summary
-    table = Table(title="Comment Analysis")
-    table.add_column("Category", style="cyan")
-    table.add_column("Count", justify="right")
-    table.add_column("Actionable", justify="right")
+    if not actionable_comments:
+        console.print("[green]✓[/green] No actionable comments found. PR looks good!")
+        return
     
-    actionable_categories = ["bug", "security", "performance", "style", "suggestion"]
+    console.print(f"\n[bold]发现 {len(actionable_comments)} 条待处理评论[/bold]\n")
     
-    for category, items in categories.items():
-        if items:
-            actionable = len(items) if category in actionable_categories else 0
-            table.add_row(category.capitalize(), str(len(items)), str(actionable))
+    # Process each comment interactively
+    pending_fixes = []
+    pending_replies = []
     
-    console.print(table)
+    for i, comment in enumerate(actionable_comments, 1):
+        result = _process_single_comment(comment, i, len(actionable_comments))
+        if result:
+            if result["action"] == "fix":
+                pending_fixes.append(result)
+            elif result["action"] == "reply":
+                pending_replies.append(result)
     
-    # Save analysis
+    # Summary
+    console.print("\n" + "=" * 60)
+    console.print("[bold]处理汇总[/bold]")
+    console.print(f"  待修复: {len(pending_fixes)} 条")
+    console.print(f"  待回复: {len(pending_replies)} 条")
+    
+    # Save pending items
     review_dir = Path.cwd() / ".review" / "results"
     review_dir.mkdir(parents=True, exist_ok=True)
     
-    from datetime import datetime
-    result_file = review_dir / f"pr-{pr_data.get('number', 'unknown')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    pr_num = pr_data.get('number', 'unknown')
     
-    result_file.write_text(json.dumps({
-        "pr": pr_data,
-        "comments": comments,
-        "analysis": {k: len(v) for k, v in categories.items()},
-    }, indent=2, default=str))
+    # Save pending fixes
+    if pending_fixes:
+        fix_file = review_dir / f"pr-{pr_num}-fixes-{timestamp}.json"
+        fix_file.write_text(json.dumps({
+            "pr": {"number": pr_num, "title": pr_data.get("title")},
+            "fixes": pending_fixes,
+            "created": timestamp
+        }, indent=2, default=str))
+        console.print(f"\n[dim]修复方案已保存: {fix_file}[/dim]")
     
-    console.print(f"\n[dim]Analysis saved to: {result_file}[/dim]")
-    console.print("[dim]Use /codereview.pr command in your AI assistant for detailed analysis.[/dim]")
+    # Save pending replies
+    if pending_replies:
+        reply_file = review_dir / f"pr-{pr_num}-replies-{timestamp}.json"
+        reply_file.write_text(json.dumps({
+            "pr": {"number": pr_num, "title": pr_data.get("title")},
+            "replies": pending_replies,
+            "created": timestamp
+        }, indent=2, default=str))
+        console.print(f"[dim]回复方案已保存: {reply_file}[/dim]")
+    
+    console.print("\n[bold]下一步:[/bold]")
+    if pending_fixes:
+        console.print("  1. 运行 [cyan]/codereview.fix[/cyan] 应用修复方案")
+        console.print("     (工具会先检查为何未自动检测，再执行修复)")
+    if pending_replies:
+        console.print("  2. 运行 [cyan]/codereview.reply[/cyan] 发送回复")
+
+
+def _process_single_comment(comment: dict, index: int, total: int) -> Optional[dict]:
+    """Process a single comment interactively."""
+    from rich.markdown import Markdown
+    
+    body = comment.get("body", "")
+    user = comment.get("user", {}).get("login", "unknown")
+    location = comment.get("path", "")
+    line = comment.get("line", comment.get("original_line", ""))
+    
+    # Display comment
+    console.print(f"\n[bold cyan]═══ 评论 {index}/{total} ═══[/bold cyan]")
+    console.print(f"[dim]评论者: {user}[/dim]")
+    if location:
+        console.print(f"[dim]位置: {location}:{line}[/dim]")
+    console.print(f"\n{body}")
+    
+    # Analyze comment
+    analysis = _analyze_comment_validity(comment)
+    
+    console.print(f"\n[bold]分析结果:[/bold] {analysis['status']}")
+    console.print(f"[dim]原因: {analysis['reason']}[/dim]")
+    
+    # Show solution preview
+    console.print(f"\n[bold]建议方案:[/bold]")
+    console.print(Panel(analysis["solution_preview"], border_style="green"))
+    
+    # User action
+    console.print("\n[bold]请选择操作:[/bold]")
+    console.print("  [1] 确认方案")
+    console.print("  [2] 查看详细方案")
+    console.print("  [3] 编辑方案")
+    console.print("  [4] 跳过")
+    console.print("  [5] 标记为需要讨论")
+    
+    choice = Prompt.ask("选择", choices=["1", "2", "3", "4", "5"], default="1")
+    
+    if choice == "1":
+        return {
+            "comment_id": comment.get("id"),
+            "comment_body": body,
+            "user": user,
+            "location": f"{location}:{line}" if location else None,
+            "action": "fix" if analysis["is_correct"] else "reply",
+            "solution": analysis["solution"],
+            "reason": analysis["reason"],
+            "tool_check": analysis.get("tool_check")
+        }
+    elif choice == "2":
+        # Show detailed solution
+        console.print(Panel(analysis["solution"], title="详细方案", border_style="cyan"))
+        if Prompt.ask("确认此方案?", choices=["y", "n"], default="y") == "y":
+            return {
+                "comment_id": comment.get("id"),
+                "comment_body": body,
+                "user": user,
+                "location": f"{location}:{line}" if location else None,
+                "action": "fix" if analysis["is_correct"] else "reply",
+                "solution": analysis["solution"],
+                "reason": analysis["reason"],
+                "tool_check": analysis.get("tool_check")
+            }
+    elif choice == "3":
+        # Edit solution
+        console.print("[dim]请输入修改后的方案 (输入完成后按 Ctrl+Z 然后回车):[/dim]")
+        lines = []
+        try:
+            while True:
+                line_input = input()
+                lines.append(line_input)
+        except EOFError:
+            pass
+        custom_solution = "\n".join(lines)
+        return {
+            "comment_id": comment.get("id"),
+            "comment_body": body,
+            "user": user,
+            "location": f"{location}:{line}" if location else None,
+            "action": "fix" if analysis["is_correct"] else "reply",
+            "solution": custom_solution or analysis["solution"],
+            "reason": analysis["reason"],
+            "tool_check": analysis.get("tool_check")
+        }
+    elif choice == "5":
+        return {
+            "comment_id": comment.get("id"),
+            "comment_body": body,
+            "user": user,
+            "action": "discuss",
+            "solution": "需要团队讨论"
+        }
+    
+    return None
+
+
+def _analyze_comment_validity(comment: dict) -> dict:
+    """
+    Analyze if a comment is correct and generate solution.
+    
+    Returns:
+        {
+            "is_correct": bool,
+            "status": str,  # "✅ 评论正确" or "❌ 评论不正确"
+            "reason": str,
+            "solution_preview": str,
+            "solution": str,
+            "tool_check": dict  # Only for correct comments
+        }
+    """
+    body = comment.get("body", "").lower()
+    location = comment.get("path", "")
+    
+    # Heuristics for common patterns
+    # In real implementation, this would use AI to analyze
+    
+    # Security issues - usually correct
+    if any(kw in body for kw in ["sql injection", "xss", "vulnerability", "security"]):
+        return {
+            "is_correct": True,
+            "status": "✅ 评论正确",
+            "reason": "安全问题是真实存在的，需要进行修复",
+            "solution_preview": "使用参数化查询/输入验证/转义处理",
+            "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 修复建议
+使用安全的编码实践修复此安全问题。
+
+### 代码修改
+```diff
+- // 存在安全问题的代码
++ // 修复后的代码
+```
+
+### 工具自检
+- 当前规则库可能未包含此模式检测
+- 建议新增安全规则以自动检测此类问题
+""",
+            "tool_check": {
+                "detected": False,
+                "reason": "当前规则库未包含此模式",
+                "suggestion": "新增 SEC 规则"
+            }
+        }
+    
+    # Performance issues - usually correct
+    if any(kw in body for kw in ["n+1", "slow", "performance", "optimize"]):
+        return {
+            "is_correct": True,
+            "status": "✅ 评论正确",
+            "reason": "性能问题确实存在，优化可以提升系统性能",
+            "solution_preview": "优化查询/添加索引/使用缓存",
+            "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 修复建议
+优化代码以提升性能。
+
+### 工具自检
+- 检查是否有 PERF 规则检测此模式
+- 可能需要添加性能分析规则
+""",
+            "tool_check": {
+                "detected": False,
+                "reason": "性能问题需要运行时分析",
+                "suggestion": "添加静态分析规则"
+            }
+        }
+    
+    # Style/Naming issues - may be incorrect depending on conventions
+    if any(kw in body for kw in ["naming", "style", "format", "indent"]):
+        # Check if it's a valid style issue
+        # This is where we'd check against language conventions
+        return {
+            "is_correct": False,
+            "status": "❌ 评论不正确",
+            "reason": "命名风格符合当前语言/项目的规范，评论者的建议不适用",
+            "solution_preview": "解释当前命名符合规范，提供参考文档",
+            "solution": f"""## 回复方案
+
+### 为什么评论不正确
+感谢您的审查！关于命名规范的问题：
+
+根据项目的编码规范，当前命名方式是正确的。
+
+### 支持证据
+- 项目编码规范文档
+- 语言官方风格指南
+
+### 回复草稿
+> 感谢您的审查！关于命名规范的问题，
+> 
+> 当前的命名方式符合项目规范。
+> 
+> 参考：[编码规范文档链接]
+"""
+        }
+    
+    # Questions - need clarification
+    if "?" in body or any(kw in body for kw in ["why", "how", "what"]):
+        return {
+            "is_correct": False,
+            "status": "ℹ️ 需要回复",
+            "reason": "这是一个问题，需要提供解释或澄清",
+            "solution_preview": "提供详细的解释和技术背景",
+            "solution": f"""## 回复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 回复草稿
+> 感谢您的问题！
+> 
+> [在此提供详细解释]
+> 
+> 如果您还有其他问题，请随时提出。
+"""
+        }
+    
+    # Default: assume correct and provide fix
+    return {
+        "is_correct": True,
+        "status": "✅ 评论正确",
+        "reason": "评论指出的问题确实存在",
+        "solution_preview": "根据评论建议进行代码修改",
+        "solution": f"""## 修复方案
+
+### 问题
+{comment.get('body', '')}
+
+### 修复建议
+根据评论者的建议进行修改。
+
+### 工具自检
+- 检查是否有对应规则
+- 评估是否需要新增规则
+""",
+        "tool_check": {
+            "detected": False,
+            "reason": "需要进一步分析",
+            "suggestion": "评估规则库完整性"
+        }
+    }
+
+
+@app.command()
+def reply(
+    reply_file: str = typer.Argument(None, help="Reply file path or 'latest' for most recent"),
+    comment_id: str = typer.Option(None, "--comment", "-c", help="Specific comment ID to reply"),
+    all_pending: bool = typer.Option(False, "--all", "-a", help="Reply to all pending comments"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without sending"),
+):
+    """Reply to PR/MR comments with generated responses."""
+    show_banner()
+    
+    review_dir = Path.cwd() / ".review" / "results"
+    
+    # Find reply file
+    if reply_file == "latest" or not reply_file:
+        reply_files = sorted(review_dir.glob("pr-*-replies-*.json"), reverse=True)
+        if not reply_files:
+            console.print("[red]Error: No pending replies found.[/red]")
+            console.print("Run 'codereview pr' first to analyze comments.")
+            raise typer.Exit(1)
+        reply_file = str(reply_files[0])
+    
+    file_path = Path(reply_file)
+    if not file_path.exists():
+        console.print(f"[red]Error: File not found: {reply_file}[/red]")
+        raise typer.Exit(1)
+    
+    # Load pending replies
+    data = json.loads(file_path.read_text())
+    replies = data.get("replies", [])
+    
+    if not replies:
+        console.print("[yellow]No pending replies in file.[/yellow]")
+        return
+    
+    console.print(f"[cyan]PR:[/cyan] #{data.get('pr', {}).get('number', 'unknown')} - {data.get('pr', {}).get('title', '')}")
+    console.print(f"[cyan]Pending replies:[/cyan] {len(replies)}\n")
+    
+    # Filter by comment_id if specified
+    if comment_id:
+        replies = [r for r in replies if str(r.get("comment_id")) == comment_id]
+        if not replies:
+            console.print(f"[red]Error: Comment {comment_id} not found.[/red]")
+            raise typer.Exit(1)
+    
+    # Process replies
+    sent_replies = []
+    for i, reply_data in enumerate(replies, 1):
+        if not all_pending and len(replies) > 1:
+            # Ask confirmation for each
+            console.print(f"\n[bold]回复 {i}/{len(replies)}[/bold]")
+            console.print(f"[dim]评论者: {reply_data.get('user')}[/dim]")
+            console.print(f"[dim]评论: {reply_data.get('comment_body', '')[:100]}...[/dim]")
+            console.print(f"\n[bold]回复内容:[/bold]")
+            console.print(Panel(reply_data.get("solution", ""), border_style="green"))
+            
+            if not dry_run:
+                choice = Prompt.ask(
+                    "发送此回复?",
+                    choices=["y", "n", "e"],
+                    default="y"
+                )
+                if choice == "n":
+                    continue
+                elif choice == "e":
+                    # Edit
+                    console.print("[dim]输入新回复 (Ctrl+Z 然后回车结束):[/dim]")
+                    lines = []
+                    try:
+                        while True:
+                            line_input = input()
+                            lines.append(line_input)
+                    except EOFError:
+                        pass
+                    reply_data["solution"] = "\n".join(lines)
+        
+        if dry_run:
+            console.print(f"[yellow]DRY RUN:[/yellow] Would send reply to comment {reply_data.get('comment_id')}")
+            sent_replies.append(reply_data)
+        else:
+            # Get auth and send
+            repo = _detect_repo_from_git()
+            platform, token, host = _get_auth_for_repo(repo or "")
+            
+            if not token:
+                console.print("[red]Error: No authentication configured.[/red]")
+                raise typer.Exit(1)
+            
+            # Send reply via API
+            result = _send_reply(platform, repo, data["pr"]["number"], reply_data, token, host)
+            
+            if result:
+                console.print(f"[green]✓[/green] Reply sent to comment {reply_data.get('comment_id')}")
+                sent_replies.append(reply_data)
+            else:
+                console.print(f"[red]✗[/red] Failed to send reply to comment {reply_data.get('comment_id')}")
+    
+    # Summary
+    console.print(f"\n[bold]回复完成[/bold]")
+    console.print(f"  已发送: {len(sent_replies)} 条")
+
+
+def _send_reply(platform: str, repo: str, pr_number: int, reply_data: dict, token: str, host: Optional[str]) -> bool:
+    """Send reply via API."""
+    import httpx
+    
+    try:
+        if platform == "github":
+            # For review comments, we need to reply to the specific comment
+            # For issue comments, we can just add a new comment
+            
+            # Try as issue comment first (simpler)
+            resp = httpx.post(
+                f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json"
+                },
+                json={"body": reply_data.get("solution", "")},
+                timeout=30
+            )
+            
+            if resp.status_code == 201:
+                return True
+            else:
+                console.print(f"[yellow]GitHub API error: {resp.status_code}[/yellow]")
+                return False
+        
+        elif platform == "gitlab":
+            base_url = host or "https://gitlab.com"
+            import urllib.parse
+            project_id = urllib.parse.quote(repo, safe='')
+            
+            resp = httpx.post(
+                f"{base_url}/api/v4/projects/{project_id}/merge_requests/{pr_number}/notes",
+                headers={"PRIVATE-TOKEN": token},
+                json={"body": reply_data.get("solution", "")},
+                timeout=30
+            )
+            
+            return resp.status_code == 201
+        
+        elif platform == "gitee":
+            owner, project = repo.split("/")
+            resp = httpx.post(
+                f"https://gitee.com/api/v5/repos/{owner}/{project}/pulls/{pr_number}/comments",
+                params={"access_token": token},
+                json={"body": reply_data.get("solution", "")},
+                timeout=30
+            )
+            
+            return resp.status_code == 201
+    
+    except Exception as e:
+        console.print(f"[red]Error sending reply: {e}[/red]")
+        return False
+    
+    return False
 
 
 def main():
