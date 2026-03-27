@@ -8,6 +8,7 @@ dependencies = [
     "click>=8.1",
     "rich",
     "pyyaml>=6.0",
+    "httpx>=0.25.0",
 ]
 
 [project.scripts]

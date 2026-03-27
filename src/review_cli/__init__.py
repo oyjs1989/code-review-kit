@@ -10,16 +10,23 @@ Usage:
     codereview report [--format html]
     codereview config
     codereview learn
+    codereview auth --platform github
+    codereview pr owner/repo 123
 """
 
 import os
+import json
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+from rich.table import Table
+from rich.prompt import Prompt
 
 app = typer.Typer(
     name="codereview",
@@ -221,6 +228,480 @@ def check():
             console.print(f"[yellow]~[/yellow] {lang}: {found}/{total} tools")
         else:
             console.print(f"[dim]○[/dim] {lang}: not installed")
+
+
+@app.command()
+def auth(
+    platform: str = typer.Option(None, "--platform", "-p", help="Platform (github, gitlab, gitee)"),
+    token: str = typer.Option(None, "--token", "-t", help="API token (will prompt if not provided)"),
+    host: str = typer.Option(None, "--host", "-h", help="Host URL (for self-hosted GitLab)"),
+    list_tokens: bool = typer.Option(False, "--list", "-l", help="List configured tokens"),
+):
+    """Configure authentication for remote repositories."""
+    show_banner()
+    
+    review_dir = Path.cwd() / ".review"
+    review_dir.mkdir(exist_ok=True)
+    auth_file = review_dir / "auth.yaml"
+    
+    if list_tokens:
+        _list_auth_config(auth_file)
+        return
+    
+    # Platform selection
+    if not platform:
+        platform = Prompt.ask(
+            "Select platform",
+            choices=["github", "gitlab", "gitee"],
+            default="github"
+        )
+    
+    # Token input
+    if not token:
+        token = Prompt.ask(
+            f"Enter {platform.upper()} token",
+            password=True
+        )
+    
+    # Validate and save
+    _save_auth_config(auth_file, platform, token, host)
+    
+    # Validate token
+    _validate_token(platform, token, host)
+    
+    console.print(f"[green]✓[/green] Authentication configured for {platform}")
+    console.print(f"[dim]Token saved to: {auth_file}[/dim]")
+
+
+def _list_auth_config(auth_file: Path):
+    """List configured authentication."""
+    if not auth_file.exists():
+        console.print("[yellow]No authentication configured.[/yellow]")
+        return
+    
+    import yaml
+    config = yaml.safe_load(auth_file.read_text()) or {}
+    
+    table = Table(title="Configured Authentication")
+    table.add_column("Platform")
+    table.add_column("Host")
+    table.add_column("Token Status")
+    
+    for platform, settings in config.items():
+        host = settings.get("host", "default")
+        token = settings.get("token", "")
+        status = "✓ Configured" if token else "✗ Missing"
+        table.add_row(platform, host, status)
+    
+    console.print(table)
+
+
+def _save_auth_config(auth_file: Path, platform: str, token: str, host: Optional[str]):
+    """Save authentication configuration."""
+    import yaml
+    
+    config = {}
+    if auth_file.exists():
+        config = yaml.safe_load(auth_file.read_text()) or {}
+    
+    config[platform] = {
+        "token": token,
+    }
+    if host:
+        config[platform]["host"] = host
+    
+    auth_file.write_text(yaml.dump(config, default_flow_style=False))
+    
+    # Ensure auth.yaml is in .gitignore
+    gitignore = Path.cwd() / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if ".review/auth.yaml" not in content:
+            gitignore.write_text(content + "\n# Code Review Kit auth\n.review/auth.yaml\n")
+    else:
+        gitignore.write_text("# Code Review Kit auth\n.review/auth.yaml\n")
+
+
+def _validate_token(platform: str, token: str, host: Optional[str]):
+    """Validate token by making a test API call."""
+    import httpx
+    
+    try:
+        if platform == "github":
+            resp = httpx.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"token {token}"},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                user = resp.json()
+                console.print(f"[green]✓[/green] Authenticated as: {user.get('login', 'unknown')}")
+            else:
+                console.print(f"[red]✗[/red] Token validation failed: {resp.status_code}")
+        
+        elif platform == "gitlab":
+            base_url = host or "https://gitlab.com"
+            resp = httpx.get(
+                f"{base_url}/api/v4/user",
+                headers={"PRIVATE-TOKEN": token},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                user = resp.json()
+                console.print(f"[green]✓[/green] Authenticated as: {user.get('username', 'unknown')}")
+            else:
+                console.print(f"[red]✗[/red] Token validation failed: {resp.status_code}")
+        
+        elif platform == "gitee":
+            resp = httpx.get(
+                "https://gitee.com/api/v5/user",
+                params={"access_token": token},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                user = resp.json()
+                console.print(f"[green]✓[/green] Authenticated as: {user.get('login', 'unknown')}")
+            else:
+                console.print(f"[red]✗[/red] Token validation failed: {resp.status_code}")
+    
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not validate token: {e}[/yellow]")
+
+
+@app.command()
+def pr(
+    repo: str = typer.Argument(None, help="Repository (owner/repo) or PR URL"),
+    pr_number: int = typer.Argument(None, help="PR/MR number"),
+    analyze: bool = typer.Option(True, "--analyze/--no-analyze", help="Analyze comments with AI"),
+    include_approved: bool = typer.Option(False, "--include-approved", help="Include approved PRs"),
+):
+    """Analyze pull/merge request comments."""
+    show_banner()
+    
+    # Parse input
+    if repo and "/" in repo and not pr_number:
+        # Could be a full PR URL or "owner/repo#123" format
+        if repo.startswith("http"):
+            repo, pr_number = _parse_pr_url(repo)
+        elif "#" in repo:
+            repo, pr_number = repo.split("#")
+            pr_number = int(pr_number)
+    
+    if not repo or not pr_number:
+        # Try to detect from git remote
+        repo = _detect_repo_from_git()
+        if not repo:
+            console.print("[red]Error: Could not determine repository.[/red]")
+            console.print("Usage: codereview pr owner/repo 123")
+            raise typer.Exit(1)
+        
+        if not pr_number:
+            pr_number = Prompt.ask("Enter PR number", type=int)
+    
+    console.print(f"[cyan]Repository:[/cyan] {repo}")
+    console.print(f"[cyan]PR Number:[/cyan] #{pr_number}")
+    console.print()
+    
+    # Get authentication
+    platform, token, host = _get_auth_for_repo(repo)
+    if not token:
+        console.print("[red]Error: No authentication configured.[/red]")
+        console.print("Run 'codereview auth --platform github' first.")
+        raise typer.Exit(1)
+    
+    # Fetch PR data
+    pr_data = _fetch_pr_data(platform, repo, pr_number, token, host)
+    
+    if not pr_data:
+        console.print("[red]Error: Could not fetch PR data.[/red]")
+        raise typer.Exit(1)
+    
+    # Display PR info
+    _display_pr_info(pr_data)
+    
+    # Fetch and analyze comments
+    comments = _fetch_pr_comments(platform, repo, pr_number, token, host)
+    
+    if analyze and comments:
+        _analyze_comments(comments, pr_data)
+
+
+def _parse_pr_url(url: str) -> tuple:
+    """Parse PR URL to extract repo and PR number."""
+    # https://github.com/owner/repo/pull/123
+    parsed = urlparse(url)
+    path_parts = parsed.path.strip("/").split("/")
+    
+    if "pull" in path_parts:
+        idx = path_parts.index("pull")
+        repo = "/".join(path_parts[:idx])
+        pr_number = int(path_parts[idx + 1])
+        return repo, pr_number
+    elif "merge_requests" in path_parts:
+        idx = path_parts.index("merge_requests")
+        repo = "/".join(path_parts[:idx])
+        pr_number = int(path_parts[idx + 1])
+        return repo, pr_number
+    
+    return None, None
+
+
+def _detect_repo_from_git() -> Optional[str]:
+    """Detect repository from git remote."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # Parse git URL
+            # git@github.com:owner/repo.git
+            # https://github.com/owner/repo.git
+            if "github.com" in url:
+                parts = url.split("github.com")[-1].strip(":/").replace(".git", "")
+                return parts
+            elif "gitlab.com" in url:
+                parts = url.split("gitlab.com")[-1].strip(":/").replace(".git", "")
+                return parts
+            elif "gitee.com" in url:
+                parts = url.split("gitee.com")[-1].strip(":/").replace(".git", "")
+                return parts
+    except Exception:
+        pass
+    return None
+
+
+def _get_auth_for_repo(repo: str) -> tuple:
+    """Get authentication for a repository."""
+    import yaml
+    
+    # Check environment variables first
+    if "GITHUB_TOKEN" in os.environ:
+        return "github", os.environ["GITHUB_TOKEN"], None
+    if "GITLAB_TOKEN" in os.environ:
+        return "gitlab", os.environ["GITLAB_TOKEN"], None
+    if "GITEE_TOKEN" in os.environ:
+        return "gitee", os.environ["GITEE_TOKEN"], None
+    
+    # Check auth file
+    auth_file = Path.cwd() / ".review" / "auth.yaml"
+    if auth_file.exists():
+        config = yaml.safe_load(auth_file.read_text()) or {}
+        
+        # Try to detect platform from repo or git remote
+        git_url = _detect_repo_from_git()
+        if git_url:
+            if "github" in str(git_url) or "github" in repo:
+                platform = "github"
+            elif "gitlab" in str(git_url) or "gitlab" in repo:
+                platform = "gitlab"
+            elif "gitee" in str(git_url) or "gitee" in repo:
+                platform = "gitee"
+            else:
+                platform = "github"  # default
+        else:
+            platform = "github"
+        
+        if platform in config:
+            return platform, config[platform].get("token"), config[platform].get("host")
+    
+    return None, None, None
+
+
+def _fetch_pr_data(platform: str, repo: str, pr_number: int, token: str, host: Optional[str]) -> Optional[dict]:
+    """Fetch PR data from API."""
+    import httpx
+    
+    try:
+        if platform == "github":
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+                headers={"Authorization": f"token {token}"},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        
+        elif platform == "gitlab":
+            base_url = host or "https://gitlab.com"
+            # GitLab uses URL-encoded project ID
+            import urllib.parse
+            project_id = urllib.parse.quote(repo, safe='')
+            resp = httpx.get(
+                f"{base_url}/api/v4/projects/{project_id}/merge_requests/{pr_number}",
+                headers={"PRIVATE-TOKEN": token},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        
+        elif platform == "gitee":
+            owner, project = repo.split("/")
+            resp = httpx.get(
+                f"https://gitee.com/api/v5/repos/{owner}/{project}/pulls/{pr_number}",
+                params={"access_token": token},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    
+    except Exception as e:
+        console.print(f"[red]Error fetching PR: {e}[/red]")
+    
+    return None
+
+
+def _fetch_pr_comments(platform: str, repo: str, pr_number: int, token: str, host: Optional[str]) -> List[dict]:
+    """Fetch PR comments from API."""
+    import httpx
+    
+    comments = []
+    
+    try:
+        if platform == "github":
+            # Review comments (inline)
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments",
+                headers={"Authorization": f"token {token}"},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                comments.extend([{"type": "review", **c} for c in resp.json()])
+            
+            # Issue comments (general)
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+                headers={"Authorization": f"token {token}"},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                comments.extend([{"type": "issue", **c} for c in resp.json()])
+            
+            # Reviews
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
+                headers={"Authorization": f"token {token}"},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                comments.extend([{"type": "review_summary", **c} for c in resp.json()])
+        
+        elif platform == "gitlab":
+            base_url = host or "https://gitlab.com"
+            import urllib.parse
+            project_id = urllib.parse.quote(repo, safe='')
+            
+            resp = httpx.get(
+                f"{base_url}/api/v4/projects/{project_id}/merge_requests/{pr_number}/notes",
+                headers={"PRIVATE-TOKEN": token},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                comments.extend([{"type": "note", **c} for c in resp.json()])
+        
+        elif platform == "gitee":
+            owner, project = repo.split("/")
+            resp = httpx.get(
+                f"https://gitee.com/api/v5/repos/{owner}/{project}/pulls/{pr_number}/comments",
+                params={"access_token": token},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                comments.extend([{"type": "comment", **c} for c in resp.json()])
+    
+    except Exception as e:
+        console.print(f"[yellow]Warning: Error fetching comments: {e}[/yellow]")
+    
+    console.print(f"[green]✓[/green] Fetched {len(comments)} comments")
+    return comments
+
+
+def _display_pr_info(pr_data: dict):
+    """Display PR information."""
+    table = Table(show_header=False, box=None)
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    
+    table.add_row("Title", pr_data.get("title", "N/A"))
+    table.add_row("Author", pr_data.get("user", {}).get("login", "N/A"))
+    table.add_row("State", pr_data.get("state", "N/A"))
+    table.add_row("Created", pr_data.get("created_at", "N/A")[:10] if pr_data.get("created_at") else "N/A")
+    table.add_row("Additions", f"+{pr_data.get('additions', 0)}")
+    table.add_row("Deletions", f"-{pr_data.get('deletions', 0)}")
+    table.add_row("Changed Files", str(pr_data.get("changed_files", 0)))
+    
+    console.print(Panel(table, title="PR Information", border_style="cyan"))
+
+
+def _analyze_comments(comments: List[dict], pr_data: dict):
+    """Analyze comments and categorize them."""
+    categories = {
+        "bug": [],
+        "security": [],
+        "performance": [],
+        "style": [],
+        "suggestion": [],
+        "question": [],
+        "approval": [],
+        "other": [],
+    }
+    
+    keywords = {
+        "bug": ["bug", "error", "crash", "broken", "fail", "incorrect"],
+        "security": ["security", "vulnerability", "injection", "xss", "csrf", "exploit"],
+        "performance": ["slow", "optimize", "performance", "n+1", "memory", "leak"],
+        "style": ["style", "naming", "format", "indent", "camel", "snake"],
+        "suggestion": ["suggest", "consider", "could", "might", "recommend"],
+        "question": ["?", "why", "how", "what", "when", "where"],
+        "approval": ["lgtm", "looks good", "approved", "approved", "👍", "merge"],
+    }
+    
+    for comment in comments:
+        body = comment.get("body", "").lower()
+        categorized = False
+        
+        for category, words in keywords.items():
+            if any(word in body for word in words):
+                categories[category].append(comment)
+                categorized = True
+                break
+        
+        if not categorized:
+            categories["other"].append(comment)
+    
+    # Display summary
+    table = Table(title="Comment Analysis")
+    table.add_column("Category", style="cyan")
+    table.add_column("Count", justify="right")
+    table.add_column("Actionable", justify="right")
+    
+    actionable_categories = ["bug", "security", "performance", "style", "suggestion"]
+    
+    for category, items in categories.items():
+        if items:
+            actionable = len(items) if category in actionable_categories else 0
+            table.add_row(category.capitalize(), str(len(items)), str(actionable))
+    
+    console.print(table)
+    
+    # Save analysis
+    review_dir = Path.cwd() / ".review" / "results"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    
+    from datetime import datetime
+    result_file = review_dir / f"pr-{pr_data.get('number', 'unknown')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    
+    result_file.write_text(json.dumps({
+        "pr": pr_data,
+        "comments": comments,
+        "analysis": {k: len(v) for k, v in categories.items()},
+    }, indent=2, default=str))
+    
+    console.print(f"\n[dim]Analysis saved to: {result_file}[/dim]")
+    console.print("[dim]Use /codereview.pr command in your AI assistant for detailed analysis.[/dim]")
 
 
 def main():

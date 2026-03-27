@@ -64,6 +64,37 @@ code-review-kit/
 | `/codereview.fix` | Auto-fix issues | patches |
 | `/codereview.report` | Generate formatted report | html/md/json |
 | `/codereview.learn` | Learn from history | config updates |
+| `/codereview.auth` | Configure authentication | .review/auth.yaml |
+| `/codereview.pr` | Analyze PR/MR comments | pr-analysis.json |
+
+## Supported Platforms for PR Analysis
+
+| Platform | API | Auth Method |
+|----------|-----|-------------|
+| GitHub | REST API v3 | Personal Access Token |
+| GitLab | REST API v4 | Personal Access Token |
+| Gitee | REST API v5 | Personal Access Token |
+
+## Authentication Setup
+
+```bash
+# Environment variable (recommended)
+export GITHUB_TOKEN="ghp_xxxx"
+
+# Or use CLI
+codereview auth --platform github --token "ghp_xxxx"
+
+# For self-hosted GitLab
+codereview auth --platform gitlab --host "https://gitlab.company.com" --token "glpat-xxxx"
+```
+
+## Required Token Scopes
+
+| Platform | Required Scopes |
+|----------|----------------|
+| GitHub | `repo`, `read:org` |
+| GitLab | `api`, `read_api` |
+| Gitee | `projects`, `pull_requests` |
 
 ## Architecture
 
