@@ -1,0 +1,248 @@
+rules:
+  # 规则说明: Go 惯例中 ID 类缩写必须全大写（UserID 而非 UserId），避免不符合 golint 规范
+  - id: QUAL-001
+    name: ID 缩写必须全大写
+    severity: P1
+    pattern:
+      type: regex
+      match: '\b(UserId|ProductId|OrderId|RoleId|AccountId|GroupId|ItemId|TaskId|MessageId|SessionId|TokenId|AppId|TenantId|MemberId|CustomerId|EmployeeId|DepartmentId|CategoryId|TagId|FileId)\b'
+    message: "Go 规范要求首字母缩写词必须全大写或全小写。ID 应写为 UserID、ProductID、OrderID 等，而非 UserId、ProductId、OrderId。违反此规范会导致 golint 报错。"
+    examples:
+      bad: 'type UserInfo struct { UserId int64; OrderId string }'
+      good: 'type UserInfo struct { UserID int64; OrderID string }'
+
+  # 规则说明: iota 生成的枚举值不直观，重构时容易因插入/删除枚举项导致数值偏移，引发数据不一致
+  - id: QUAL-002
+    name: 禁用 iota 定义枚举常量
+    severity: P1
+    pattern:
+      type: regex
+      match: '\biota\b'
+    message: "禁止使用 iota 定义业务枚举常量。iota 的值依赖声明顺序，插入或删除枚举项会导致后续数值偏移，破坏数据库中已存储的枚举值映射。应为每个常量显式赋值（如 StatusActive = 1）。"
+    examples:
+      bad: "const ( StatusUnknown = iota; StatusActive; StatusInactive )"
+      good: "const ( StatusUnknown = 0; StatusActive = 1; StatusInactive = 2 )"
+
+  # 规则说明: 全局变量（尤其是可变全局变量）会引入隐式状态，使代码难以测试和并发安全
+  # NOTE: 此规则误报率较高，agent 需二次确认——预编译正则（var xxxRe = regexp.MustCompile）和测试文件中的全局变量可豁免
+  - id: QUAL-003
+    name: 禁用可变全局变量
+    severity: P1
+    pattern:
+      type: regex
+      match: '^var [a-zA-Z][a-zA-Z0-9]* [^=]*='
+    message: "禁止声明可变的包级全局变量（var）。全局变量引入隐式共享状态，导致代码难以测试（无法注入 mock）和并发不安全。应通过依赖注入传递依赖。豁免情况：regexp.MustCompile 预编译正则、sync.Once 初始化的单例。"
+    examples:
+      bad: "var defaultTimeout = 30 * time.Second"
+      good: "// 通过配置或依赖注入传递\nfunc NewService(timeout time.Duration) *Service { ... }"
+
+  # 规则说明: init 函数执行顺序不可控，难以测试，隐藏副作用，应显式初始化
+  # NOTE: 例外：server 包需要通过 init() 注册服务（如 gRPC/HTTP 路由注册），此场景可豁免
+  - id: QUAL-004
+    name: 禁用 init 函数（server 包除外）
+    severity: P1
+    pattern:
+      type: regex
+      match: '^func init\(\)'
+    message: "禁止使用 init() 函数进行初始化。init() 执行时机隐式，执行顺序依赖文件/包加载顺序，难以测试和调试。应使用显式初始化函数（如 NewXxx() 或 InitXxx()），由调用方在 main() 中显式调用。例外：server 包（如 internal/server/ 目录）需要通过 init() 注册 gRPC/HTTP 服务时可以使用，其他任何包一律禁止。"
+    examples:
+      bad: "// service/user.go\nfunc init() { db = connectDatabase() }"
+      good: "func InitDB(cfg *Config) (*gorm.DB, error) { return connectDatabase(cfg) }"
+
+  # 规则说明: switch 语句必须包含 default 分支，处理未预期的枚举值，避免静默忽略
+  # NOTE: 此规则误报率较高，正则仅检测 switch 关键字，agent 需检查对应 switch 块是否有 default 分支
+  - id: QUAL-005
+    name: switch 必须包含 default 分支
+    severity: P1
+    pattern:
+      type: regex
+      match: '\bswitch\b.*\{'
+    message: "switch 语句必须包含 default 分支。缺少 default 会静默忽略未预期的枚举值，导致程序行为不可预期。default 分支至少应记录警告日志或返回错误。注意：此规则需结合 switch 块完整内容判断。"
+    examples:
+      bad: "switch status { case 1: doA(); case 2: doB() }"
+      good: "switch status { case 1: doA(); case 2: doB(); default: log.Warn(ctx, \"unknown status\", log.Int(\"status\", status)) }"
+
+  # 规则说明: TODO/NOTE 注释必须标注负责人，否则无法追踪是否已处理
+  - id: QUAL-006
+    name: TODO/NOTE 注释必须标注 owner
+    severity: P1
+    pattern:
+      type: regex
+      match: '// (TODO|NOTE|FIXME|HACK)[^(]'
+    message: "TODO/NOTE/FIXME/HACK 注释必须标注负责人和时间，格式为 // TODO(username): 描述 或 // TODO(username, 2024-01-01): 描述。无 owner 的 TODO 永远不会被处理。"
+    examples:
+      bad: '// TODO: fix this later'
+      good: '// TODO(zhangsan): fix null pointer issue when user not found'
+
+  # 规则说明: make 初始化 slice/map 时应预估容量，避免动态扩容导致的频繁内存分配
+  # NOTE: 此规则误报率中等，make([]Type) 无法区分是否确实需要容量预估，agent 需根据上下文判断
+  - id: QUAL-007
+    name: make 初始化应指定容量
+    severity: P2
+    pattern:
+      type: regex
+      match: 'make\(\[\][a-zA-Z*][a-zA-Z0-9.*]*\)'
+    message: "使用 make() 初始化切片时建议指定预估容量（如 make([]T, 0, len(input))），避免因动态扩容产生频繁内存分配和数据拷贝。如果无法预估容量，至少应说明原因。make(map[K]V) 同理。"
+    examples:
+      bad: 'result := make([]UserInfo)'
+      good: 'result := make([]UserInfo, 0, len(users))'
+
+  # 规则说明: 公开导出函数/接口（大写开头）必须有有意义的 godoc 注释，便于 IDE 提示和文档生成
+  # NOTE: 此规则误报率较高，仅检测大写函数定义，agent 需检查前一行是否有注释以及注释是否有实质内容
+  - id: QUAL-008
+    name: 公开函数/接口必须有有意义的注释
+    severity: P1
+    pattern:
+      type: regex
+      match: '^func [A-Z][a-zA-Z0-9]*\('
+    message: "所有导出函数/接口（大写开头）必须有 godoc 注释，注释以函数名开头（如 // GetUser returns...）。注释应说明函数用途、参数含义和返回值说明。两点重要原则：① 接口命名保持简单准确，体现单一职责；② 注释过于简单等于无效注释（如仅写 // GetUser is a function 没有任何价值），必须说明行为、边界条件或业务含义。"
+    examples:
+      bad: "// GetUser is a function.\nfunc GetUser(ctx context.Context, id int64) (*User, error) {"
+      good: "// GetUser retrieves a user by ID. Returns ErrNotFound if the user does not exist.\nfunc GetUser(ctx context.Context, id int64) (*User, error) {"
+
+  # 规则说明: 枚举常量应有中文注释说明业务含义，便于维护者理解数值含义
+  - id: QUAL-009
+    name: 枚举常量应有中文业务注释
+    severity: P2
+    pattern:
+      type: regex
+      match: '[[:space:]][A-Za-z][a-zA-Z0-9]* +[A-Za-z][a-zA-Z0-9]* += +[0-9]$'
+    message: "枚举常量应在行尾或上方添加中文注释，说明该枚举值的业务含义（如 StatusActive = 1 // 激活状态）。纯数字枚举值缺少注释会让维护者难以理解其业务语义。"
+    examples:
+      bad: 'StatusActive = 1'
+      good: 'StatusActive = 1 // 激活状态：用户账号正常可用'
+
+  # 规则说明: 包名应与目录名一致，此规则在静态正则层面难以精确检测，作为占位规则由 agent 处理
+  # NOTE: 此规则的精确检测需要跨文件上下文（目录名 vs 包名对比），scan-rules.sh 难以实现，
+  #       agent 在代码审查时应人工检查包名与目录名是否一致
+  - id: QUAL-010
+    name: 包名与目录名必须一致
+    severity: P2
+    pattern:
+      type: regex
+      match: '^package [a-z][a-z0-9]*$'
+    message: "Go 包名必须与所在目录名保持一致（下划线替换为空，复数形式保持）。包名与目录名不一致会导致导入路径混乱，违反 Go 工具链惯例。注意：此规则需对比包声明与实际目录名，仅靠正则无法完整检测，agent 需人工核查。"
+    examples:
+      bad: "// 目录名为 user_service，但包名为\npackage userSvc"
+      good: "// 目录名为 userservice，包名应为\npackage userservice"
+
+  # 规则说明: 切片和 map 必须通过 make() 初始化，不能使用字面量 {} 初始化（unmarshal/scan 目标变量除外）
+  - id: QUAL-011
+    name: 禁止使用字面量 {} 初始化切片/map，应使用 make()
+    severity: P1
+    pattern:
+      type: regex
+      match: ':= \[\][a-zA-Z*][a-zA-Z0-9.*]*\{\}|:= map\[[a-zA-Z][a-zA-Z0-9]*\][a-zA-Z]'
+    message: "切片和 map 必须通过 make() 初始化，禁止使用字面量 {} 初始化（如 []Type{} 或 map[K]V{}）。字面量初始化无法指定初始容量，可能导致频繁扩容，且与 make() 的惯用写法不一致。豁免场景：① 用于 json.Unmarshal/db.Scan/proto.Unmarshal 的目标变量（通常用 var 声明即可）；② 初始化包含字面量元素的切片（如 []string{\"a\", \"b\"}）。"
+    examples:
+      bad: "result := []UserInfo{}"
+      good: "result := make([]UserInfo, 0, len(users))"
+
+  # 规则说明: 嵌入的结构体（匿名字段）必须声明在 struct 定义的最顶层，不能混在命名字段中间
+  # NOTE: 此规则无法通过单行正则有效检测，需要 agent 查看完整 struct 定义，正则仅作为触发提示
+  - id: QUAL-012
+    name: 嵌入结构体必须声明在最顶层
+    severity: P2
+    pattern:
+      type: regex
+      match: '^\s+[A-Z][a-zA-Z0-9]*\s*`'
+    message: "嵌入的结构体（匿名字段，如 BaseModel、gorm.Model）必须声明在 struct 定义的最顶层，不能插入在命名字段中间。顶层声明让 struct 层次清晰，嵌入字段提升的方法/属性集中可见。注意：此正则命中带 struct tag 的大写字段，误报率高，agent 需检查命中字段是否为匿名嵌入字段，以及其在 struct 中的位置是否在顶部。"
+    examples:
+      bad: "type User struct {\n  Name string\n  BaseModel\n  Age  int\n}"
+      good: "type User struct {\n  BaseModel\n  Name string\n  Age  int\n}"
+
+  # 规则说明: 重复使用的字符串/数字常量应统一定义在常量包内，避免魔法值散落在各业务包
+  # NOTE: 此规则无法通过正则有效检测，agent 需判断常量是否散落在非 consts/constant 包且具备复用价值
+  - id: QUAL-013
+    name: 重复使用的常量应统一定义在常量包
+    severity: P2
+    pattern:
+      type: regex
+      match: '^const [a-zA-Z]'
+    message: "如果字符串常量（状态值、类型值、业务标识）或数字常量（阈值、限制值）在多处使用或有复用需求，应统一定义在常量包（如 consts/ 或 constant/）中，而非散落在各业务包内。散落的魔法值修改时需全局搜索替换，容易遗漏。例外：数据库查询的 SELECT 字段字符串无需提取为常量。注意：此规则需 agent 判断常量定义位置是否合理，正则仅作为检测常量声明的触发器，误报率极高。"
+    examples:
+      bad: "// service/user.go\nconst activeStatus = \"active\" // 多处复用，应定义在 consts 包"
+      good: "// consts/user.go\nconst UserStatusActive = \"active\"\n// service/user.go 引用 consts.UserStatusActive"
+
+  # 规则说明: 单测不能只验证 err == nil，必须验证具体的返回值结构（字段、数量、类型等）
+  # NOTE: 此规则误报率中等，agent 需检查 NoError/Nil 断言之后是否有对返回值的具体断言
+  - id: QUAL-014
+    name: 单测必须验证具体的返回值结构
+    severity: P1
+    pattern:
+      type: regex
+      match: '(assert|require)\.(NoError|Nil)\(t,\s*err\)'
+    message: "单元测试不能只验证 err == nil，必须同时验证具体的返回值结构（字段值、数量、类型等）。仅验证无错误不等于验证行为正确，可能掩盖逻辑错误（如返回了空数据、错误的字段值）。必须在 assert.NoError/assert.Nil 之后添加对返回值的具体断言（如 assert.Equal、assert.NotEmpty、assert.Len）。例外：函数本身无有意义的返回值（如纯副作用函数），或已通过 mock 验证了具体调用行为。"
+    examples:
+      bad: "result, err := GetUser(ctx, 1)\nassert.NoError(t, err)\n// 缺少对 result 的具体断言"
+      good: "result, err := GetUser(ctx, 1)\nassert.NoError(t, err)\nassert.Equal(t, int64(1), result.ID)\nassert.Equal(t, \"zhangsan\", result.Name)"
+
+  # 规则说明: 代码中的标识符、注释不应包含明显的英文拼写错误
+  # NOTE: 此规则正则仅覆盖部分常见拼写错误，agent 需综合检查所有标识符和注释的拼写
+  - id: QUAL-015
+    name: 代码中不允许出现拼写错误
+    severity: P2
+    pattern:
+      type: regex
+      match: '\b(recieve|occured|seperator|lenght|heigth|succesful|occurance|writting|begining|dependancy|transfered|enviornment|caluclate|paramter|mangager|reponse|requets|resposne|respones)\b'
+    message: "代码中的标识符、注释、字符串不应包含英文拼写错误。常见错误：recieve→receive、occured→occurred、seperator→separator、lenght→length 等。如果项目约定了特定缩写（如 authen 代替 authentication），需维护在拼写白名单中。建议配置 IDE 拼写检查插件（VS Code: Code Spell Checker）。agent 应检查提交代码中所有明显的拼写错误，不限于正则命中词。"
+    examples:
+      bad: "func recieveMessage(ctx context.Context) error { ... }"
+      good: "func receiveMessage(ctx context.Context) error { ... }"
+
+  # 规则说明: 切片变量应使用 make 初始化，var 声明的切片值为 nil，json.Marshal 序列化为 null 而非 []
+  # NOTE: 此规则需结合上下文判断——用于 json.Unmarshal/db.Scan/proto.Unmarshal 的接收变量可豁免
+  - id: QUAL-018
+    name: 切片变量禁用 var 声明，应使用 make 初始化
+    severity: P1
+    pattern:
+      type: regex
+      match: '^\s+var [a-zA-Z][a-zA-Z0-9]* \[\]\*?[a-zA-Z]'
+    message: "禁止使用 var 声明空切片（如 var list []Type 或 var list []*Type），应使用 make([]Type, 0) 或 make([]Type, 0, cap) 初始化。原因：var 声明的切片值为 nil，make 初始化的切片为非 nil 空切片——两者在 json.Marshal 时行为不同（nil 序列化为 null，空切片序列化为 []），容易引发 API 响应不一致问题。与 QUAL-011（禁用 []Type{} 字面量）互补，共同确保所有切片初始化统一使用 make。豁免场景：① 用于 json.Unmarshal/db.Scan/proto.Unmarshal 的接收变量；② 函数语义上需要区分 nil 与空（Optional 语义）。"
+    examples:
+      bad: "var specList []*ali_ecs.DescribeInstanceTypesResponseBodyInstanceTypesInstanceType"
+      good: "specList := make([]*ali_ecs.DescribeInstanceTypesResponseBodyInstanceTypesInstanceType, 0)"
+
+  # 规则说明: 获取列表的接口方法应以 GetList/Search 命名，Get 语义上表示单条记录，GetList/Search 表示多条
+  # NOTE: 此规则误报率中等，正则匹配返回切片的 Get 前缀方法，agent 需确认方法是否确实返回列表
+  - id: QUAL-016
+    name: 获取列表的方法应命名为 GetList 或 Search 而非 Get
+    severity: P1
+    pattern:
+      type: regex
+      match: '\bGet[A-Z][a-zA-Z]*\s*\([^)]*\)\s*\(\[\]'
+    message: "接口方法返回切片类型时，方法名应使用 GetList 或 Search 前缀，而非 Get。Get 在语义上通常表示获取单条记录；GetList/Search 明确表达获取多条记录的意图，避免调用方产生语义歧义。例如：GetUserList 替代 GetUsers，SearchByStatus 替代 GetByStatus。注意：此规则误报率中等，agent 需确认方法确实用于获取列表（返回 [] 类型），单条查询的 Get 方法无需修改。"
+    examples:
+      bad: "type UserRepo interface { GetUser(ctx context.Context) ([]*bo.User, error) }"
+      good: "type UserRepo interface { GetUserList(ctx context.Context) ([]*bo.User, error) }"
+
+  # 规则说明: 枚举所有类型的 switch/if-else 链是扩展性违规的信号，新增类型时必须修改核心逻辑
+  # NOTE: 此规则误报率中等，正则匹配带字符串/整型分支的 switch 语句，agent 需确认是否为枚举型分支
+  #       且判断能否用 map 数据驱动替代；类型断言 switch（type switch）不适用此规则
+  - id: QUAL-017
+    name: 枚举型 switch 应考虑 map 数据驱动替代（Rule of Extensibility）
+    severity: P2
+    pattern:
+      type: regex
+      match: 'switch\s+\w+\s*\{[\s\S]*?case\s+"[^"]*"[\s\S]*?case\s+"[^"]*"'
+    message: "多 case 枚举字符串类型的 switch 语句是扩展性违规的信号。新增一种类型时必须修改核心逻辑函数，违反开闭原则（UNIX Rule of Extensibility）。应考虑用 map[string]Handler 数据驱动替代：新增类型只需在 map 中注册，核心调度函数保持不变。注意：agent 需判断该 switch 是否为枚举所有业务类型的分支（如 provider、msgType、action 等），并确认业务上确实会新增类型；类型断言 switch 和少于 3 个 case 的分支无需处理。"
+    examples:
+      bad: |
+        switch provider {
+        case "aws":
+            return processAWS(data)
+        case "aliyun":
+            return processAliyun(data)
+        default:
+            return errors.New("unknown provider")
+        }
+      good: |
+        var providers = map[string]func([]byte) error{
+            "aws":    processAWS,
+            "aliyun": processAliyun,
+        }
+        handler, ok := providers[provider]
+        if !ok {
+            return errors.Errorf("unknown provider: %s", provider)
+        }
+        return handler(data)

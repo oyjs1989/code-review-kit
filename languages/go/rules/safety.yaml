@@ -1,0 +1,172 @@
+rules:
+  # 规则说明: 任何情况下 err 不允许通过 format 来补充错误信息，统一使用 errors.Wrap[f] 或 errors.WithMessage[f]
+  - id: SAFE-001
+    name: 禁用 fmt.Errorf 包装/构造错误
+    severity: P0
+    pattern:
+      type: regex
+      match: 'fmt\.Errorf\('
+    message: "禁止使用 fmt.Errorf() 构造或包装错误。规则：① 直接构造新错误用 errors.New()；② 包装已有 err 并附加上下文用 errors.Wrap(err, \"msg\") 或 errors.Wrapf(err, \"msg: %d\", id)；③ 附加消息不含格式化参数用 errors.WithMessage(err, \"msg\")。fmt.Errorf 即使带 %w 也不是首选方式，errors.Wrap 能保留完整的错误堆栈信息。"
+    examples:
+      bad: 'return fmt.Errorf("update user failed: %w", err)'
+      good: 'return errors.Wrap(err, "update user failed")'
+
+  # 规则说明: 业务函数禁止使用 panic，panic 会导致程序崩溃，应通过 error 返回值传递错误
+  - id: SAFE-002
+    name: 业务函数禁用 panic
+    severity: P0
+    pattern:
+      type: regex
+      match: '\bpanic\('
+    message: "禁止在业务逻辑中使用 panic()。panic 会导致整个服务崩溃。应通过 error 返回值传递错误信息，让调用方决定如何处理。注意：在 _test.go 测试文件中使用 panic 是正常用法（测试辅助函数），Agent 应跳过 _test.go 文件的命中。"
+    examples:
+      bad: 'panic("invalid user id")'
+      good: 'return errors.New("invalid user id")'
+
+  # 规则说明: error 应作为最后一个返回值，符合 Go 惯例，便于调用方统一处理
+  # NOTE: 此规则误报率较高，agent 需二次确认——正则仅能检测 error 后面还有其他返回值的情况
+  - id: SAFE-003
+    name: error 必须作为最后一个返回值
+    severity: P1
+    pattern:
+      type: regex
+      match: '\(error,[[:space:]]*[a-zA-Z]'
+    message: "函数返回值中 error 必须放在最后位置，符合 Go 惯例（如 (T, error) 而非 (error, T)）。调用方通常用 v, err := f() 模式，error 在最后便于统一处理。"
+    examples:
+      bad: 'func GetUser(id int) (error, *User)'
+      good: 'func GetUser(id int) (*User, error)'
+
+  # 规则说明: recover() 后必须记录日志或重新 panic，不能静默吞掉错误
+  - id: SAFE-004
+    name: 禁用 recover 静默吞掉错误
+    severity: P0
+    pattern:
+      type: regex
+      match: 'recover\(\)'
+    message: "使用 recover() 时必须记录日志（log.Error）并处理错误，不能静默吞掉 panic 信息。否则问题会被隐藏，难以排查。建议模式：if r := recover(); r != nil { log.Error(...) }"
+    examples:
+      bad: "defer func() { recover() }()"
+      good: "defer func() { if r := recover(); r != nil { log.Error(ctx, \"panic recovered\", log.Any(\"err\", r)) } }()"
+
+  # 规则说明: 加锁后必须紧跟 defer unlock，防止因 panic 或提前 return 导致死锁
+  - id: SAFE-005
+    name: 锁操作必须配合 defer 解锁
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.Lock\(\)'
+    message: "调用 .Lock() 后必须紧跟 defer .Unlock()，防止因函数提前 return 或 panic 导致死锁。正确模式：mu.Lock(); defer mu.Unlock()"
+    examples:
+      bad: "mu.Lock()\n// 业务代码\nmu.Unlock()"
+      good: "mu.Lock()\ndefer mu.Unlock()"
+
+  # 规则说明: goroutine 中不应用 _ 忽略错误，否则错误会被静默丢弃
+  - id: SAFE-006
+    name: goroutine 中禁止忽略错误
+    severity: P1
+    pattern:
+      type: regex
+      match: 'go func\(.*\).*\{[^}]*_ ='
+    message: "在 goroutine 中不能用 _ 忽略函数返回的 error。goroutine 中的错误无法冒泡到调用方，必须显式记录日志或通过 channel 传递。"
+    examples:
+      bad: "go func() { _ = processOrder(ctx, id) }()"
+      good: "go func() { if err := processOrder(ctx, id); err != nil { log.Error(ctx, \"process order failed\", log.ErrorField(err)) } }()"
+
+  # 规则说明: errors.New(fmt.Sprintf(...)) 是反模式，应直接使用 fmt.Errorf 或 errors.Errorf
+  - id: SAFE-007
+    name: 禁止 errors.New 嵌套 fmt.Sprintf
+    severity: P0
+    pattern:
+      type: regex
+      match: 'errors\.New\(fmt\.Sprintf\('
+    message: "禁止使用 errors.New(fmt.Sprintf(...)) 构造格式化错误。应直接使用 fmt.Errorf(\"...\", args) 或 errors.Errorf(\"...\", args)，更简洁且性能更好。"
+    examples:
+      bad: 'errors.New(fmt.Sprintf("user %d not found", id))'
+      good: 'fmt.Errorf("user %d not found", id)'
+
+  # 规则说明: 错误消息不应包含复杂格式化，保持简洁明了
+  # NOTE: 此规则针对 errors.Errorf 中过度使用 % 格式化占位符的情况，误报率中等，agent 需确认上下文
+  - id: SAFE-008
+    name: 错误消息避免过度格式化
+    severity: P1
+    pattern:
+      type: regex
+      match: 'errors\.Errorf\(.*%[a-z].*%[a-z].*%[a-z]'
+    message: "错误消息中超过 2 个格式化占位符时，建议封装为结构化错误类型，或用 errors.WithMessage 附加上下文，避免错误消息过于复杂难以维护。"
+    examples:
+      bad: 'errors.Errorf("update user failed: id=%d, name=%s, role=%s, status=%d", id, name, role, status)'
+      good: 'errors.Wrapf(err, "update user failed: id=%d", id)'
+
+  # 规则说明: 禁止用 _ 接收 error 返回值，所有 error 必须被处理
+  - id: SAFE-009
+    name: 禁止用 _ 接收 error 返回值
+    severity: P0
+    pattern:
+      type: regex
+      match: '[^a-zA-Z_]_ =[^=]'
+    message: "禁止使用 _ 忽略函数返回的 error。每个 error 都必须显式检查和处理。如果确实不需要处理，必须添加注释说明原因（如：// 此操作不影响主流程）。"
+    examples:
+      bad: '_ = db.Create(&user)'
+      good: 'if err := db.Create(&user).Error; err != nil { return errors.Wrap(err, "create user failed") }'
+
+  # 规则说明: 禁止用 fmt.Sprintf 拼接 JSON，应使用 json.Marshal 或结构体序列化
+  - id: SAFE-010
+    name: 禁止用 fmt.Sprintf 拼接 JSON
+    severity: P0
+    pattern:
+      type: regex
+      match: 'fmt\.Sprintf\(.*["''][{[]'
+    message: "禁止使用 fmt.Sprintf 拼接 JSON 字符串。字符串拼接容易引入转义错误和注入漏洞。应使用 json.Marshal() 序列化结构体，或使用官方 encoding/json 包。"
+    examples:
+      bad: 'body := fmt.Sprintf(`{"user_id": %d, "name": "%s"}`, id, name)'
+      good: "body, err := json.Marshal(struct{ UserID int64 `json:\"user_id\"`; Name string `json:\"name\"` }{UserID: id, Name: name})"
+
+  # 规则说明: 使用指针变量前必须检查是否为 nil，防止 nil pointer dereference panic
+  # NOTE: 此规则误报率极高，正则仅匹配函数签名中含指针入参，agent 需结合函数体确认是否有 nil guard
+  - id: SAFE-011
+    name: 指针变量使用前必须校验 nil
+    severity: P1
+    pattern:
+      type: regex
+      match: 'func\s+\([^)]*\)\s+[A-Za-z][a-zA-Z0-9]*\([^)]*\*[A-Z][a-zA-Z0-9]*'
+    message: "函数接收指针入参时，必须在使用前校验是否为 nil，防止 nil pointer dereference panic。需要 nil 检查的场景：① 函数公开导出且入参为指针；② 从 map/slice 取出的指针元素；③ 外部调用返回的指针（如 db.Take 后的结果）。正确模式：if ptr == nil { return errors.New(\"xxx is nil\") }。注意：此规则误报率极高，agent 需判断是否有前置 nil 保证（如已由调用方校验）。"
+    examples:
+      bad: "func (s *Service) Process(req *Request) error { return s.do(req.Data) // 未检查 req nil }"
+      good: "func (s *Service) Process(req *Request) error { if req == nil { return errors.New(\"req is nil\") }; return s.do(req.Data) }"
+
+  # 规则说明: 函数内使用了 ctx 时，必须通过函数入参传递，不得在函数体内新建 context
+  - id: SAFE-012
+    name: ctx 必须通过函数入参传递
+    severity: P1
+    pattern:
+      type: regex
+      match: 'context\.(Background|TODO)\(\)'
+    message: "禁止在中间层（service/repository/handler）函数体内调用 context.Background() 或 context.TODO() 创建新 context。如果函数内部需要使用 ctx，则该函数的入参必须包含 context.Context。在函数体内新建 context 会断开整个请求的链路追踪（trace/span），导致日志无法关联。例外：main() 函数、后台 goroutine 启动点、测试代码可以使用 context.Background()。"
+    examples:
+      bad: "func (r *userRepo) GetUser(id int64) (*User, error) { ctx := context.Background(); return r.db.WithContext(ctx).Take(&user).Error }"
+      good: "func (r *userRepo) GetUser(ctx context.Context, id int64) (*User, error) { return r.db.WithContext(ctx).Take(&user).Error }"
+
+  # 规则说明: 并发操作应使用 recovered.ErrorGroup，它内置 panic recover 能力，避免 goroutine panic 导致服务崩溃
+  - id: SAFE-013
+    name: 并发操作应使用 recovered.ErrorGroup 替代 sync.WaitGroup
+    severity: P1
+    pattern:
+      type: regex
+      match: 'sync\.WaitGroup'
+    message: "并发操作中应优先使用 recovered.ErrorGroup（项目 common 包提供）替代 sync.WaitGroup。recovered.ErrorGroup 内置 panic recover 能力，防止子 goroutine 的 panic 导致整个服务崩溃，同时提供统一的 error 收集机制。使用方式：errGroup := recovered.NewErrorGroup(); errGroup.Go(func() error { ... }); err := errGroup.Wait()。例外：纯同步等待场景（不涉及错误收集）可以使用 sync.WaitGroup。"
+    examples:
+      bad: "wg := sync.WaitGroup{}; wg.Add(len(items)); for _, item := range items { go func(i Item) { defer wg.Done(); process(i) }(item) }; wg.Wait()"
+      good: "errGroup := recovered.NewErrorGroup(); for _, item := range items { item := item; errGroup.Go(func() error { return process(item) }) }; err := errGroup.Wait()"
+
+  # 规则说明: for range 循环中启动 goroutine 时，必须使用 limiter 控制并发数量，防止资源耗尽
+  # NOTE: 此规则误报率较高，正则仅匹配 for range 后跟 go func 的模式，agent 需确认是否使用了并发控制
+  - id: SAFE-014
+    name: for range 中启动 goroutine 必须使用 limiter 控制并发
+    severity: P1
+    pattern:
+      type: regex
+      match: 'for\s+\w+.*:=\s+range\b'
+    message: "在 for range 循环中启动 goroutine 时，必须使用 limiter.NewConcurrentLimiter 控制最大并发数，防止因并发过高导致资源耗尽（内存溢出、连接池耗尽、下游限流）。使用方式：l := limiter.NewConcurrentLimiter(maxConcurrent); l.Execute(func() { ... })。注意：此规则误报率极高，agent 需确认循环体内是否有 goroutine 启动（go func 或 errGroup.Go），以及是否已有并发控制手段。纯遍历操作无需 limiter。"
+    examples:
+      bad: "for _, item := range items { go func(i Item) { process(i) }(item) } // 无并发控制，item 数量大时资源耗尽"
+      good: "l := limiter.NewConcurrentLimiter(10); for _, item := range items { item := item; l.Execute(func() { process(item) }) }"

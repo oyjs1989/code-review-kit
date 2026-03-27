@@ -1,0 +1,140 @@
+rules:
+  # 规则说明: log.Any 传递数字类型时类型信息不明确，应使用 log.Int、log.Int64、log.Float64 等显式类型函数
+  # NOTE: 此规则误报率中等，log.Any 传 len() 或 count 变量是最明显的误用场景
+  - id: OBS-001
+    name: log.Any 禁止传递数字类型值
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.Any\([^)]*\b(len\(|count|total|num|size|amount|qty)\b'
+    message: "禁止使用 log.Any() 传递数字类型的日志字段。应使用显式类型函数：整数用 log.Int() 或 log.Int64()，浮点数用 log.Float64()。显式类型让日志聚合系统能正确识别字段类型，便于统计分析。"
+    examples:
+      bad: 'log.Info(ctx, "query result", log.Any("count", len(users)))'
+      good: 'log.Info(ctx, "query result", log.Int("count", len(users)))'
+
+  # 规则说明: 日志字段 key 应使用 snake_case 命名，而非 PascalCase，符合日志平台字段规范
+  - id: OBS-002
+    name: 日志字段 key 必须使用 snake_case
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.(String|Int|Int64|Float64|Bool|Any)\("[A-Z][a-zA-Z]*"'
+    message: "日志字段 key 必须使用 snake_case 命名（如 user_id、order_status），禁止使用 PascalCase（如 UserID、OrderStatus）。snake_case 是日志平台（ELK/Loki）的标准字段格式，便于统一查询和告警规则配置。"
+    examples:
+      bad: 'log.Int64("UserID", userID)'
+      good: 'log.Int64("user_id", userID)'
+
+  # 规则说明: Error 级别日志必须附带 log.ErrorField(err) 字段，且必须放在所有字段的最后位置
+  # NOTE: 此规则误报率较高，仅检测 log.Error 调用，agent 需确认调用中是否包含 log.ErrorField 且位于末尾
+  - id: OBS-003
+    name: Error 日志必须包含 ErrorField 且放在末尾
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.Error\('
+    message: "调用 log.Error() 时必须满足两个条件：① 必须包含 log.ErrorField(err) 字段，将错误对象完整记录；② log.ErrorField(err) 必须放在所有字段的最后位置。仅记录消息字符串会丢失错误堆栈信息；ErrorField 不在末尾会破坏日志字段的一致性，影响日志平台解析。正确格式：log.Error(ctx, \"操作失败\", log.String(\"key\", val), log.ErrorField(err))"
+    examples:
+      bad: 'log.Error(ctx, "create user failed", log.ErrorField(err), log.String("name", name)) // ErrorField 不在末尾'
+      good: 'log.Error(ctx, "create user failed", log.String("name", name), log.ErrorField(err))'
+
+  # 规则说明: data/repository/store 层不应打日志，日志应在 service 层打印，避免重复日志和职责混乱
+  # NOTE: 此规则为多行上下文匹配，正则仅检测函数名包含 Repository/Store/Dao 的函数，误报率中等，
+  #       agent 需确认日志调用是否确实在 data 层函数内
+  - id: OBS-004
+    name: data 层禁止打日志
+    severity: P1
+    pattern:
+      type: regex
+      match: 'func \(.*\) [A-Za-z].*Repository\b|func \(.*\) [A-Za-z].*Store\b|func \(.*\) [A-Za-z].*Dao\b'
+    message: "Repository/Store/Dao 层（数据访问层）禁止直接调用 log.Info/log.Error 打日志。日志应在 Service 层统一管理，data 层只负责数据操作并返回 error。data 层打日志会导致：日志重复、日志缺少业务上下文、职责边界模糊。注意：此规则需结合函数体内容确认。pkg 包（通用工具包）同理，也禁止打日志，见 OBS-010。"
+    examples:
+      bad: "func (r *userRepository) Create(ctx context.Context, user *User) error { log.Info(ctx, \"creating user\"); return r.db.Create(user).Error }"
+      good: "func (r *userRepository) Create(ctx context.Context, user *User) error { return r.db.Create(user).Error }"
+
+  # 规则说明: Error 日志必须包含足够的上下文字段，单独的 "fail" 消息缺乏排查价值
+  # NOTE: 此规则误报率较高，检测 log.Error 中消息以 fail 结尾但缺少字段的情况，agent 需综合判断
+  - id: OBS-005
+    name: Error 日志必须包含上下文字段
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.Error\(ctx, "[^"]*fail[^"]*"\)'
+    message: "Error 日志消息必须附带足够的上下文字段（至少包含关键 ID 和错误对象）。仅有消息字符串的日志无法定位问题。必须包含：log.ErrorField(err) + 至少一个业务标识字段（如 user_id、order_id）。"
+    examples:
+      bad: 'log.Error(ctx, "create user fail")'
+      good: 'log.Error(ctx, "create user fail", log.ErrorField(err), log.Int64("user_id", userID))'
+
+  # 规则说明: 生产代码禁用 fmt.Println，应使用结构化日志框架
+  - id: OBS-006
+    name: 生产代码禁用 fmt.Println
+    severity: P0
+    pattern:
+      type: regex
+      match: 'fmt\.Println\('
+    message: "禁止在生产代码中使用 fmt.Println()。fmt.Println 输出无结构化格式、无日志级别、无上下文字段，无法被日志收集系统解析。应使用项目统一的结构化日志框架（如 log.Info/log.Debug）。注意：如果命中行以 // 开头（注释代码），请忽略此命中。"
+    examples:
+      bad: 'fmt.Println("user created:", user.ID)'
+      good: 'log.Info(ctx, "user created", log.Int64("user_id", user.ID))'
+
+  # 规则说明: 生产代码禁用 fmt.Printf，应使用结构化日志框架
+  - id: OBS-007
+    name: 生产代码禁用 fmt.Printf
+    severity: P0
+    pattern:
+      type: regex
+      match: 'fmt\.Printf\('
+    message: "禁止在生产代码中使用 fmt.Printf()。与 fmt.Println 相同，fmt.Printf 输出无结构化格式、无日志级别，无法被日志收集系统（ELK/Loki）解析聚合。应使用结构化日志框架（如 log.Info、log.Debug）替代。注意：如果命中行以 // 开头（注释代码），请忽略此命中。"
+    examples:
+      bad: 'fmt.Printf("processing order %d for user %s\n", orderID, userName)'
+      good: 'log.Info(ctx, "processing order", log.Int64("order_id", orderID), log.String("user_name", userName))'
+
+  # 规则说明: 错误消息不应使用绝对断言式措辞，应描述发生了什么而非系统的最终状态
+  - id: OBS-008
+    name: 错误消息避免绝对断言式措辞
+    severity: P2
+    pattern:
+      type: regex
+      match: '"(is terminating|is dead|has failed|is broken|is down|is crashed|is destroyed)"'
+    message: "错误消息应描述\"发生了什么\"而非用绝对断言描述系统状态。\"is dead\"、\"has failed\"等措辞在分布式系统中可能是误判（如临时网络抖动）。建议改用：\"failed to connect\"、\"request timed out\"、\"returned error\" 等描述性措辞。"
+    examples:
+      bad: 'return errors.New("database is dead")'
+      good: 'return errors.Wrap(err, "failed to connect to database")'
+
+  # 规则说明: 除了极简函数，函数内禁止只有 error 日志，正常流程必须有 info/debug 日志以便追踪
+  # NOTE: 此规则误报率高，正则仅检测 log.Error 调用，agent 需判断函数是否有足够的 info/debug 日志
+  - id: OBS-009
+    name: 非简单函数禁止只有 error 日志
+    severity: P2
+    pattern:
+      type: regex
+      match: 'log\.Error\('
+    message: "除非函数极为简单（少于 5 行、无中间状态）或没有有意义的中间过程，否则函数内不允许只有 error 日志，必须有关键步骤的 info 或 debug 日志用于正常流程追踪。只有 error 日志意味着正常流程完全不可见，排查问题时缺乏上下文（无法判断是否执行到某一步）。注意：此规则与 OBS-003/OBS-005 命中同一 pattern，agent 需综合判断函数体内是否存在足量的 info/debug 日志点。"
+    examples:
+      bad: "func ProcessOrder(ctx context.Context, id int64) error {\n  order, err := r.get(ctx, id)\n  if err != nil { log.Error(ctx, \"get order fail\", log.ErrorField(err)); return err }\n  if err = r.update(ctx, order); err != nil { log.Error(ctx, \"update fail\", log.ErrorField(err)); return err }\n  return nil\n}"
+      good: "func ProcessOrder(ctx context.Context, id int64) error {\n  log.Info(ctx, \"start process order\", log.Int64(\"order_id\", id))\n  order, err := r.get(ctx, id)\n  if err != nil { log.Error(ctx, \"get order fail\", log.ErrorField(err), log.Int64(\"order_id\", id)); return err }\n  if err = r.update(ctx, order); err != nil { log.Error(ctx, \"update order fail\", log.ErrorField(err), log.Int64(\"order_id\", id)); return err }\n  return nil\n}"
+
+  # 规则说明: pkg 包（通用工具包）内不应打日志，应通过 error 返回让上层决定如何处理
+  # NOTE: 此规则需要 agent 判断日志调用是否位于 pkg/ 目录下的代码，正则仅匹配日志调用作为触发器
+  - id: OBS-010
+    name: pkg 包禁止打日志
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.(Info|Debug|Warn|Error)\(ctx'
+    message: "非特殊场景下，pkg 包（通用工具包，如 pkg/util/、pkg/helper/ 等）内禁止打日志。pkg 包是可复用的基础组件，不应依赖特定的日志框架，否则会：① 将日志框架耦合到通用组件；② 在业务日志中引入通用层噪声；③ 让调用方失去日志控制权。pkg 包应通过 error 返回值让上层（service）决定是否记录日志及如何记录。注意：此规则需 agent 判断命中代码是否位于 pkg/ 目录，正则误报率极高。"
+    examples:
+      bad: "// pkg/util/validator.go\nfunc ValidateUser(data *User) error { log.Info(ctx, \"validating user\"); return nil }"
+      good: "// pkg/util/validator.go\nfunc ValidateUser(data *User) error { if data == nil { return errors.New(\"user data is nil\") }; return nil }"
+
+  # 规则说明: log.ErrorField(err) 必须放在所有日志字段的末尾，保持日志格式一致性，便于日志平台解析
+  # NOTE: 此规则检测 ErrorField 后面还有其他字段的情况（ErrorField 后面跟逗号和 log.），误报率中等
+  - id: OBS-011
+    name: log.ErrorField 必须放在日志字段末尾
+    severity: P2
+    pattern:
+      type: regex
+      match: 'log\.ErrorField\([^)]+\)\s*,'
+    message: "log.ErrorField(err) 必须作为 log.Error/log.Warn 调用中最后一个字段参数，不能在其后面再追加其他字段。将 ErrorField 放在末尾能保持所有日志调用的一致格式，便于日志分析工具（ELK/Loki）正确解析错误字段，也方便在日志中快速定位错误信息。正确格式：log.Error(ctx, \"msg\", log.String(\"key\", val), log.Int64(\"id\", id), log.ErrorField(err))"
+    examples:
+      bad: 'log.Error(ctx, "create user failed", log.ErrorField(err), log.String("name", name))'
+      good: 'log.Error(ctx, "create user failed", log.String("name", name), log.ErrorField(err))'

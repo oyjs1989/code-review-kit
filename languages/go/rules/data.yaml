@@ -1,0 +1,176 @@
+rules:
+  # 规则说明: db.Save() 会更新所有字段（包括零值），容易覆盖其他字段数据，应用 Updates() 指定字段
+  - id: DATA-001
+    name: 禁用 db.Save() 全量更新
+    severity: P0
+    pattern:
+      type: regex
+      match: '\.Save\(&'
+    message: "禁止使用 db.Save(&model) 进行全量更新。Save() 会将所有字段（包括零值）写入数据库，可能覆盖其他并发更新的字段。应使用 db.Model(&model).Updates(map) 指定需要更新的字段。"
+    examples:
+      bad: 'db.Save(&user)'
+      good: 'db.Model(&user).Updates(map[string]interface{}{"name": name, "status": status})'
+
+  # 规则说明: SELECT * 会拉取所有字段，浪费带宽和内存，应明确指定需要的字段
+  - id: DATA-002
+    name: 禁用 SELECT * 查询所有字段
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.Select\("\*"\)'
+    message: "禁止使用 SELECT * 查询所有字段。应明确指定需要的字段（如 .Select(\"id, name, status\")），减少数据传输量，避免因表结构变化导致的隐式错误。"
+    examples:
+      bad: 'db.Select("*").Where("id = ?", id).Find(&users)'
+      good: 'db.Select("id, name, status, created_at").Where("id = ?", id).Find(&users)'
+
+  # 规则说明: First() 使用 ORDER BY primary key，会导致全表扫描；Take() 不排序，性能更好
+  - id: DATA-003
+    name: 优先使用 Take() 而非 First()
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.First\('
+    message: "避免使用 .First() 查询单条记录。First() 隐式添加 ORDER BY primary key，在无索引覆盖时会导致性能问题。若不需要排序保证，请改用 .Take()（不排序，性能更好）。"
+    examples:
+      bad: 'db.Where("id = ?", id).First(&user)'
+      good: 'db.Where("id = ?", id).Take(&user)'
+
+  # 规则说明: GORM struct tag 应显式指定 column 名，避免依赖命名转换规则导致的隐式映射
+  # NOTE: 此规则误报率较高，agent 需二次确认——简单字段（如 ID、CreatedAt）可能不需要 column tag
+  - id: DATA-004
+    name: GORM tag 必须指定 column 名
+    severity: P1
+    pattern:
+      type: regex
+      match: 'gorm:"[^"]*"'
+    message: "GORM struct tag 应显式指定 column 名（如 gorm:\"column:user_id\"），避免依赖 GORM 的命名转换规则。显式映射让代码意图更清晰，重构时不会因字段名变更导致隐式 SQL 错误。"
+    examples:
+      bad: 'UserID int64 `gorm:"not null"`'
+      good: 'UserID int64 `gorm:"column:user_id;not null"`'
+
+  # 规则说明: 事务函数参数应命名为 tx，区分事务 DB 和普通 DB，防止在事务内误用外部 db
+  - id: DATA-005
+    name: 事务函数参数必须命名为 tx
+    severity: P1
+    pattern:
+      type: regex
+      match: 'Transaction\(func\(db \*gorm\.'
+    message: "db.Transaction() 的回调函数参数必须命名为 tx 而非 db，以区分事务内的数据库连接和外部 db 变量。误用外部 db 会导致操作脱离事务范围，无法回滚。"
+    examples:
+      bad: "db.Transaction(func(db *gorm.DB) error { return db.Create(&user).Error })"
+      good: "db.Transaction(func(tx *gorm.DB) error { return tx.Create(&user).Error })"
+
+  # 规则说明: 循环中单条 Create 会产生 N 个 INSERT 语句，应使用 CreateInBatches 批量插入
+  # NOTE: 此规则为多行模式匹配，grep 单行正则难以精确匹配，agent 需二次确认代码上下文
+  - id: DATA-006
+    name: 禁止在循环中单条 Create
+    severity: P2
+    pattern:
+      type: regex
+      match: 'for .* range .*\{'
+    message: "禁止在 for range 循环中逐条调用 db.Create()。N 条记录会产生 N 次数据库往返，严重影响性能。应收集所有数据后使用 db.CreateInBatches(records, batchSize) 批量插入。注意：此规则误报率极高。仅当循环体内存在实际的数据库写操作（Insert/Save/Update/Create 等）时才报告。如果循环体内只有读操作或无 DB 操作，请忽略此命中。"
+    examples:
+      bad: "for _, item := range items { db.Create(&item) }"
+      good: "db.CreateInBatches(items, 100)"
+
+  # 规则说明: 禁止用 fmt.Sprintf 拼接 JSON，应使用 json.Marshal 序列化
+  - id: DATA-007
+    name: 禁止用 fmt.Sprintf 构造 JSON 字符串
+    severity: P0
+    pattern:
+      type: regex
+      match: 'fmt\.Sprintf\(.*[{[].*"[^"]*"'
+    message: "禁止使用 fmt.Sprintf 手动拼接 JSON 字符串。手动拼接容易遗漏转义、产生格式错误，且无法处理特殊字符。应定义结构体并使用 json.Marshal() 序列化，或使用 encoding/json 包。"
+    examples:
+      bad: 'jsonStr := fmt.Sprintf(`{"id": %d, "name": "%s"}`, id, name)'
+      good: "data, _ := json.Marshal(map[string]interface{}{\"id\": id, \"name\": name})"
+
+  # 规则说明: storage 层的 struct 用于数据库映射，omitempty 会导致零值字段不更新，引发数据错误
+  - id: DATA-008
+    name: storage 层 struct 禁用 omitempty
+    severity: P1
+    pattern:
+      type: regex
+      match: 'json:"[^"]*omitempty'
+    message: "数据库映射 struct 的 JSON tag 禁止使用 omitempty。omitempty 会导致零值字段（0、false、空字符串）在序列化时被忽略，更新数据库时无法将字段清零。storage 层 struct 应去掉 omitempty，仅在 DTO/VO 层使用。"
+    examples:
+      bad: 'Status int `gorm:"column:status" json:"status,omitempty"`'
+      good: 'Status int `gorm:"column:status" json:"status"`'
+
+  # 规则说明: 批量更新/删除必须使用主键 id 定位，不能用 name/status 等非唯一字段作为唯一定位条件
+  # NOTE: 此规则误报率较高，仅检测 Where 中出现 name= 或 status= 的情况，agent 需确认是否缺少 id 条件
+  - id: DATA-009
+    name: 更新/删除必须包含 id 定位条件
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.(Updates|Delete)\(.*\).*Where\("(name|status|type|code) ='
+    message: "执行 Updates() 或 Delete() 时必须包含主键 id 作为定位条件，禁止仅用 name、status、type 等非唯一字段定位。非唯一字段可能匹配多条记录，导致批量误更新/误删除。"
+    examples:
+      bad: 'db.Where("status = ?", 1).Delete(&User{})'
+      good: 'db.Where("id = ? AND status = ?", id, 1).Delete(&User{})'
+
+  # 规则说明: 批量操作循环中逐条调用 db.Create/db.Delete 会产生 N 次 DB 往返，应使用批量接口
+  # NOTE: 此规则为多行模式，此正则为单行简化版，匹配置信度中等，agent 需二次确认
+  - id: DATA-010
+    name: 批量操作禁止循环单条处理
+    severity: P0
+    pattern:
+      type: regex
+      match: 'for .* range .*db\.(Create|Delete)\('
+    message: "禁止在 for range 循环中逐条调用 db.Create() 或 db.Delete()。应使用批量接口：批量插入用 db.CreateInBatches(records, batchSize)，批量删除用 db.Where(\"id IN ?\", ids).Delete(&Model{})。"
+    examples:
+      bad: "for _, id := range ids { db.Delete(&User{}, id) }"
+      good: 'db.Where("id IN ?", ids).Delete(&User{})'
+
+  # 规则说明: .Scan() 绕过 GORM 模型映射，直接扫描到任意结构，容易导致字段映射错误或缺少类型约束
+  # NOTE: 此规则在复杂聚合查询（GROUP BY、JOIN 返回自定义结构）等场景可豁免，agent 需结合上下文判断
+  - id: DATA-011
+    name: 一般情况下禁止使用 .Scan()
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.Scan\(&'
+    message: "一般情况下禁止使用 .Scan() 查询数据。Scan() 绕过 GORM 模型约束，直接映射到任意 struct，容易导致字段映射错误、缺少类型安全保障。应使用 .Take()（单条）或 .Find()（多条）配合 GORM 模型类型。豁免场景：复杂聚合查询（GROUP BY、JOIN 返回非标准模型结构）时可使用，但需添加注释说明原因。"
+    examples:
+      bad: "db.Where(\"id = ?\", id).Scan(&result)"
+      good: "db.Where(\"id = ?\", id).Take(&user)"
+
+  # 规则说明: GORM 查询/修改的 WHERE 条件必须通过 .Where() 方法明确声明，禁止将条件内联在模型 struct 中
+  # NOTE: 此规则误报率中等，正则匹配 Find/Take/First/Updates/Delete 中内联 struct 字面量的情况，agent 需确认
+  - id: DATA-012
+    name: GORM 条件必须通过 .Where() 明确声明
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.(Find|Take|First|Updates|Delete)\(&[A-Z][a-zA-Z0-9]*\s*\{[^}]+'
+    message: "GORM 查询/修改时，WHERE 条件必须通过 .Where() 方法明确声明，禁止将条件内联在模型 struct 初始化中（如 .Find(&User{Status: 1})）。内联条件在零值字段时行为不可预期（GORM 会忽略零值），且可读性差、易引发隐式全表扫描。正确模式：db.Where(\"status = ?\", 1).Find(&users)。"
+    examples:
+      bad: "db.Find(&User{Status: 1, Type: 2})"
+      good: 'db.Where("status = ? AND type = ?", 1, 2).Find(&users)'
+
+  # 规则说明: GORM 链式调用超过 3 个方法时应换行，每个方法独占一行，提高可读性
+  # NOTE: 此规则误报率中等，正则检测单行超过 4 个 GORM 链式调用方法，agent 需确认是否需要换行
+  - id: DATA-013
+    name: GORM 长链式调用必须换行格式化
+    severity: P2
+    pattern:
+      type: regex
+      match: 'db\.[A-Za-z]+\(.*\)\.[A-Za-z]+\(.*\)\.[A-Za-z]+\(.*\)\.[A-Za-z]+'
+    message: "GORM 链式调用超过 3 个方法时，必须按方法换行格式化，每个方法独占一行并缩进，禁止所有方法写在同一行。换行格式能显著提高可读性，便于 code review 时快速理解查询结构和条件。正确格式：db.Model(&model{}).\n    Where(\"id = ?\", id).\n    Select(\"id, name, status\").\n    Find(&results)"
+    examples:
+      bad: 'return db.Model(&model.PermissionGroup{}).Where("id = ? ", id).Select("group_code, permission_list").Updates(map[string]interface{}{"permission_list": list}).Error'
+      good: "return db.Model(&model.PermissionGroup{}).\n    Where(\"id = ?\", id).\n    Select(\"group_code, permission_list\").\n    Updates(map[string]interface{}{\"permission_list\": list}).\n    Error"
+
+  # 规则说明: 不涉及 JSON 序列化/反序列化的结构体字段，禁止添加 json tag，避免不必要的标签噪声
+  # NOTE: 此规则需要 agent 结合结构体的使用场景判断，纯数据库映射 struct 应去掉 json tag
+  - id: DATA-014
+    name: 纯数据库映射 struct 禁止添加 json tag
+    severity: P2
+    pattern:
+      type: regex
+      match: 'gorm:"[^"]*"[^`\n]*json:"[^"]*"'
+    message: "仅用于数据库映射（有 gorm tag）且不涉及 JSON 序列化/反序列化的结构体字段，禁止添加 json tag。不必要的 json tag 会造成代码噪声，且当字段值为零值时 omitempty 可能导致字段丢失。结构体的使用场景决定标签类型：① 纯 DB 模型（model/）只加 gorm tag；② HTTP 请求/响应（DTO/VO）可加 json tag；③ 两者兼用时需权衡，通常应拆分为独立 struct。注意：此规则需 agent 判断 struct 是否用于 HTTP 接口，正则命中带双标签的字段，误报率中等。"
+    examples:
+      bad: 'Status int `gorm:"column:status;not null" json:"status"` // 纯 DB 模型不需要 json tag'
+      good: 'Status int `gorm:"column:status;not null"` // 纯 DB 模型只需 gorm tag'
