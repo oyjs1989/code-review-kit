@@ -108,17 +108,272 @@ def review(
     rules: str = typer.Option("default", "--rules", "-r", help="Rules profile"),
     output: str = typer.Option("markdown", "--output", "-o", help="Output format (markdown, json, html)"),
     language: str = typer.Option(None, "--lang", "-l", help="Override language detection"),
+    auto_install: bool = typer.Option(True, "--install/--no-install", help="Auto-install missing scanning tools"),
+    interactive: bool = typer.Option(True, "--interactive/--batch", help="Interactive mode for fixing issues"),
 ):
-    """Run code review on target files."""
+    """Run full code review: scan -> analyze -> report -> fix (optional)."""
+    from datetime import datetime
+    from collections import defaultdict
+    
     show_banner()
-    console.print(f"[cyan]Reviewing:[/cyan] {target}")
-    console.print(f"[cyan]Rules:[/cyan] {rules}")
+    
+    target_path = Path(target).resolve()
+    console.print(f"[cyan]Target:[/cyan] {target_path}")
     console.print(f"[cyan]Output:[/cyan] {output}")
+    
+    # Detect language
+    if not language:
+        language = _detect_language(target_path)
+    console.print(f"[cyan]Language:[/cyan] {language}")
     console.print()
     
-    # TODO: Implement actual review logic
-    console.print("[yellow]Review logic to be implemented...[/yellow]")
-    console.print("[dim]Use /codereview.review command in your AI assistant for now.[/dim]")
+    # Step 1: Run scanners
+    console.print("[bold]Step 1: Running code scanners...[/bold]")
+    output_path = Path(".review/scanner-results")
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    all_issues = []
+    if language == "go":
+        all_issues = _run_go_scanners(target_path, output_path, "all", auto_install)
+    elif language == "python":
+        all_issues = _run_python_scanners(target_path, output_path, "all", auto_install)
+    elif language == "typescript":
+        all_issues = _run_typescript_scanners(target_path, output_path, "all", auto_install)
+    else:
+        console.print(f"[yellow]Warning: Scanner for '{language}' not yet implemented[/yellow]")
+    
+    console.print()
+    
+    # Step 2: Analyze results
+    console.print("[bold]Step 2: Analyzing scan results...[/bold]")
+    
+    # P0 rules (must fix)
+    p0_rules = ['broad-exception-caught', 'raise-missing-from', 'no-member', 'not-callable', 
+                'singleton-comparison', 'syntax-error', 'undefined-variable']
+    # P1 rules (should fix)
+    p1_rules = ['unused-import', 'unused-argument', 'unused-variable', 'redefined-outer-name', 
+                'import-outside-toplevel', 'duplicate-code', 'cyclic-import']
+    # P2 rules (suggested)
+    p2_rules = ['trailing-whitespace', 'line-too-long', 'logging-fstring-interpolation', 
+                'missing-final-newline', 'wrong-import-position', 'wrong-import-order', 
+                'bad-indentation', 'missing-function-docstring', 'missing-module-docstring',
+                'invalid-name', 'too-few-public-methods', 'no-else-return']
+    
+    p0_issues = [i for i in all_issues if i.get('rule') in p0_rules]
+    p1_issues = [i for i in all_issues if i.get('rule') in p1_rules]
+    p2_issues = [i for i in all_issues if i.get('rule') in p2_rules]
+    other_issues = [i for i in all_issues if i.get('rule') not in p0_rules + p1_rules + p2_rules]
+    
+    # Display summary
+    console.print()
+    summary_table = Table(title="Review Summary", show_header=True)
+    summary_table.add_column("Priority", style="cyan")
+    summary_table.add_column("Count", justify="right")
+    summary_table.add_column("Description")
+    
+    summary_table.add_row("P0 (Must Fix)", str(len(p0_issues)), "Security/Correctness issues")
+    summary_table.add_row("P1 (Should Fix)", str(len(p1_issues)), "Code quality issues")
+    summary_table.add_row("P2 (Suggested)", str(len(p2_issues)), "Style issues")
+    summary_table.add_row("Other", str(len(other_issues)), "Other issues")
+    summary_table.add_row("[bold]Total[/bold]", f"[bold]{len(all_issues)}[/bold]", "")
+    
+    console.print(summary_table)
+    
+    # Step 3: Generate report
+    console.print()
+    console.print("[bold]Step 3: Generating report...[/bold]")
+    
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    result_dir = Path(".review/results")
+    result_dir.mkdir(parents=True, exist_ok=True)
+    
+    report_data = {
+        "timestamp": timestamp,
+        "target": str(target_path),
+        "language": language,
+        "summary": {
+            "total": len(all_issues),
+            "p0": len(p0_issues),
+            "p1": len(p1_issues),
+            "p2": len(p2_issues),
+            "other": len(other_issues)
+        },
+        "p0_issues": p0_issues,
+        "p1_issues": p1_issues,
+        "p2_issues": p2_issues,
+        "other_issues": other_issues
+    }
+    
+    # Save JSON report
+    json_report = result_dir / f"review-{timestamp}.json"
+    json_report.write_text(json.dumps(report_data, indent=2, default=str))
+    
+    # Generate Markdown report
+    md_report = result_dir / f"review-{timestamp}.md"
+    md_content = _generate_markdown_report(report_data)
+    md_report.write_text(md_content, encoding='utf-8')
+    
+    console.print(f"[green]✓[/green] JSON report: {json_report}")
+    console.print(f"[green]✓[/green] Markdown report: {md_report}")
+    
+    # Step 4: Interactive fix (if enabled)
+    if interactive and (p0_issues or p1_issues):
+        console.print()
+        console.print("[bold]Step 4: Interactive Fix Mode[/bold]")
+        console.print()
+        
+        # Ask user what to fix
+        console.print("Select issues to fix:")
+        console.print("  [1] Fix P0 issues only")
+        console.print("  [2] Fix P0 and P1 issues")
+        console.print("  [3] Fix all issues")
+        console.print("  [4] Auto-fix style issues (P2) with ruff")
+        console.print("  [5] Skip fixing")
+        
+        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4", "5"], default="5")
+        
+        if choice == "4":
+            _auto_fix_style_issues(target_path, language)
+        elif choice in ["1", "2", "3"]:
+            issues_to_fix = []
+            if choice == "1":
+                issues_to_fix = p0_issues
+            elif choice == "2":
+                issues_to_fix = p0_issues + p1_issues
+            else:
+                issues_to_fix = all_issues
+            
+            console.print(f"\n[yellow]Note: Automated fixing of {len(issues_to_fix)} issues requires manual review.[/yellow]")
+            console.print(f"[dim]Review the report at: {md_report}[/dim]")
+    
+    console.print()
+    console.print("[bold green]Review complete![/bold green]")
+    console.print(f"[dim]View report: {md_report}[/dim]")
+
+
+def _generate_markdown_report(data: dict) -> str:
+    """Generate Markdown report from review data."""
+    lines = [
+        "# Code Review Report",
+        "",
+        f"**Generated**: {data['timestamp']}",
+        f"**Target**: {data['target']}",
+        f"**Language**: {data['language']}",
+        "",
+        "## Summary",
+        "",
+        "| Priority | Count | Description |",
+        "|----------|--------|-------------|",
+        f"| P0 (Must Fix) | {data['summary']['p0']} | Security/Correctness |",
+        f"| P1 (Should Fix) | {data['summary']['p1']} | Code Quality |",
+        f"| P2 (Suggested) | {data['summary']['p2']} | Style |",
+        f"| Other | {data['summary']['other']} | Other |",
+        f"| **Total** | **{data['summary']['total']}** | |",
+        "",
+    ]
+    
+    # P0 Issues
+    if data['p0_issues']:
+        lines.extend([
+            "## P0 Issues (Must Fix)",
+            "",
+            "### By Rule",
+            ""
+        ])
+        
+        from collections import defaultdict
+        by_rule = defaultdict(list)
+        for issue in data['p0_issues']:
+            by_rule[issue.get('rule', 'unknown')].append(issue)
+        
+        for rule, issues in sorted(by_rule.items(), key=lambda x: -len(x[1])):
+            lines.append(f"#### {rule} ({len(issues)} issues)")
+            lines.append("")
+            for issue in issues[:10]:
+                file_name = issue.get('file', '').split('\\')[-1].split('/')[-1]
+                lines.append(f"- `{file_name}:{issue.get('line', 0)}` - {issue.get('message', '')}")
+            if len(issues) > 10:
+                lines.append(f"- ... and {len(issues) - 10} more")
+            lines.append("")
+    
+    # P1 Issues summary
+    if data['p1_issues']:
+        lines.extend([
+            "## P1 Issues (Should Fix)",
+            ""
+        ])
+        by_rule = defaultdict(int)
+        for issue in data['p1_issues']:
+            by_rule[issue.get('rule', 'unknown')] += 1
+        for rule, count in sorted(by_rule.items(), key=lambda x: -x[1]):
+            lines.append(f"- {rule}: {count} issues")
+        lines.append("")
+    
+    # P2 Issues summary
+    if data['p2_issues']:
+        lines.extend([
+            "## P2 Issues (Suggested)",
+            "",
+            "These can be auto-fixed with `ruff --fix .`",
+            ""
+        ])
+        by_rule = defaultdict(int)
+        for issue in data['p2_issues']:
+            by_rule[issue.get('rule', 'unknown')] += 1
+        for rule, count in sorted(by_rule.items(), key=lambda x: -x[1]):
+            lines.append(f"- {rule}: {count} issues")
+        lines.append("")
+    
+    # Recommendations
+    lines.extend([
+        "## Recommendations",
+        "",
+        "1. **P0 Priority**: Fix security and correctness issues immediately",
+        "2. **P1 Priority**: Address code quality issues in next sprint",
+        "3. **P2 Priority**: Use `ruff check --fix .` to auto-fix style issues",
+        "",
+        "## Quick Fix Commands",
+        "",
+        "```bash",
+        "# Auto-fix style issues",
+        "ruff check --fix .",
+        "",
+        "# Format code",
+        "ruff format .",
+        "```",
+        ""
+    ])
+    
+    return '\n'.join(lines)
+
+
+def _auto_fix_style_issues(target_path: Path, language: str):
+    """Auto-fix style issues using ruff or other tools."""
+    import subprocess
+    
+    console.print("[cyan]Auto-fixing style issues...[/cyan]")
+    
+    if language == "python":
+        # Use ruff to auto-fix
+        result = subprocess.run(
+            ["ruff", "check", "--fix", str(target_path)],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            console.print("[green]✓ Style issues fixed[/green]")
+        else:
+            console.print(f"[yellow]Some issues could not be auto-fixed[/yellow]")
+        
+        # Also format
+        result = subprocess.run(
+            ["ruff", "format", str(target_path)],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        console.print("[green]✓ Code formatted[/green]")
 
 
 @app.command()
