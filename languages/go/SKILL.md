@@ -17,7 +17,7 @@ allowed-tools:
   - Bash(python3:*)
 ---
 
-# Go Code Review Skill (v4.0.0)
+# Go Code Review Skill (v6.0.0)
 
 ## When to Use This Skill
 
@@ -205,7 +205,7 @@ git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=
 **重要**：所有审查输出必须使用中文。
 
 ```markdown
-# Go 代码审查报告（v5.0.0）
+# Go 代码审查报告
 
 ## 审查摘要
 
