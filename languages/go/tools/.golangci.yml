@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec
+    - gocognit
+    - misspell
+  settings:
+    gocognit:
+      min-complexity: 15
+
+exclusions:
+  generated: strict
+
+output:
+  formats:
+    json:
+      path: stdout

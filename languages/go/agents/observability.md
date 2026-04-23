@@ -50,6 +50,16 @@ tools: ["Read", "Grep", "Glob"]
 
 可以使用 `Read`、`Grep`、`Bash` 工具探索代码。
 
+### 读取溯源（必须）
+
+**每次使用 Read 工具读取文件后，必须立即在 response 中输出一行溯源记录**，格式：
+
+```
+[已读取] path/to/file.go L起始-L结束
+```
+
+**禁止跳过此步骤。** 每条 finding 必须能溯源到实际读取的行号，这是防止「跳过阅读直接输出结论」的机制。若读取了多个文件，每个文件单独一行记录。
+
 ### 工具沉淀约定
 
 每次 review 沉淀工具，而不是写一次性临时脚本：
@@ -468,10 +478,12 @@ func HandleRequest(ctx context.Context, req *Request) {
 
 **重要**: 所有问题描述和建议必须使用中文输出。
 
-按如下格式报告（用中文）：
+按如下格式报告每个问题（用中文）：
 
-### 问题 - [P0/P1/P2] <问题类别>
-**位置**: path/to/file.go:行号
+### [P1] OBS-NNN · path/to/file.go:行号
+
+**<问题标题（一句话）>**
+
 **类别**: <具体类别，如：日志分层 / 业务节点缺日志 / 错误消息不清 / 上下文断链 / 日志级别 / 字段缺失>
 **原始代码**:
 ```go
@@ -482,3 +494,7 @@ func HandleRequest(ctx context.Context, req *Request) {
 ```go
 // 修复代码
 ```
+**置信度:** 0.88
+**needs_clarification:** null
+
+> `needs_clarification` 字段：若判断需要了解日志基础设施架构，填写具体问题；确定成立则填 `null`。

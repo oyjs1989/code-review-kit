@@ -52,6 +52,16 @@ tools: ["Read", "Grep", "Glob"]
 
 可以使用 `Read`、`Grep`、`Bash` 工具探索代码。读取变更文件的**完整内容**，而不仅仅是 diff 片段——业务分析需要理解完整调用链和上下文。
 
+### 读取溯源（必须）
+
+**每次使用 Read 工具读取文件后，必须立即在 response 中输出一行溯源记录**，格式：
+
+```
+[已读取] path/to/file.go L起始-L结束
+```
+
+**禁止跳过此步骤。** 每条 finding 必须能溯源到实际读取的行号，这是防止「跳过阅读直接输出结论」的机制。若读取了多个文件，每个文件单独一行记录。
+
 ### 工具沉淀约定
 
 每次 review 沉淀工具，而不是写一次性临时脚本：
@@ -367,8 +377,10 @@ func GetPage(total, page, pageSize int) (offset, limit int) {
 按如下格式报告每个问题（中文）：
 
 ```markdown
-### 问题 - [P0/P1/P2] <问题类别>（来自：business agent）
-**位置**: path/to/file.go:行号
+### [P0] BIZ-NNN · path/to/file.go:行号
+
+**<问题标题（一句话）>**
+
 **类别**: <具体类别，如：状态机缺陷 / 权限校验缺失 / 幂等性风险 / 业务约束违反 / 并发超卖 / 计算精度>
 **业务场景**:
 > <用一句话描述触发这个 bug 的具体业务场景，如："用户在网络不稳定时重复点击下单按钮">
@@ -381,6 +393,10 @@ func GetPage(total, page, pageSize int) (offset, limit int) {
 ```go
 // 修复方向（伪代码或关键逻辑即可，不要求完整实现）
 ```
+**置信度:** 0.88
+**needs_clarification:** null
+
+> `needs_clarification` 字段：若业务判断需要了解产品规格（如幂等性要求），填写具体问题；确定成立则填 `null`。
 ```
 
 ### 严重度标准（业务视角）

@@ -37,7 +37,28 @@ tools: ["Read", "Grep"]
 
 ## 输入格式
 
-从 `$SESSION_DIR/all-findings.md` 中读取所有 P0/P1 条目（`[P0]` 或 `[P1]` 开头的 findings）。
+Verifier 接收两部分输入（由 SKILL.md 在 prompt 中拼接传入）：
+
+### 1. Context Package
+
+完整的代码上下文（来自 `$SESSION_DIR/context-package.md`），包含：
+- `[Intent]`：变更意图（commit messages）
+- `[Change Set]`：完整 diff
+- `[Context]`：变更函数定义
+- `[Architecture Context]`（Full 档可选）：架构背景
+
+### 2. P0/P1 Findings to Verify
+
+来自 `$SESSION_DIR/all-findings.md` 中所有 `[P0]` 和 `[P1]` 条目。
+
+v7 格式：
+```markdown
+### [P0] SAFE-003 · src/auth.go:42-47
+**来源**: safety
+**置信度**: 0.98
+**needs_clarification**: null
+...
+```
 
 ## 输出格式
 

@@ -1,23 +1,28 @@
 ---
 name: go-code-review
-description: 'This skill should be used when the user asks to "review Go code", "check Go code quality", "review this PR", "code review", or mentions Go code standards, GORM best practices, error handling patterns, concurrency safety, design philosophy, naming conventions, or UNIX principles. Orchestrates comprehensive Go code reviews using a three-tier architecture: quantitative tools + YAML pattern scanning + 7 domain-expert AI agents.'
-version: 6.0.0
+description: 'Use when the user asks to "review Go code", "check Go code quality", "review this PR", "code review", or mentions Go error handling, concurrency safety, GORM patterns, UNIX principles, naming conventions. Orchestrates Go code review: golangci-lint + YAML rules + 7 domain-expert AI agents. Supports --branch, --base, --output, --resume flags.'
+version: 7.0.0
 allowed-tools:
   - Bash(git:*)
   - Bash(bash:*)
   - Bash(go:*)
+  - Bash(golangci-lint:*)
   - Bash(grep:*)
   - Bash(find:*)
   - Bash(ls:*)
-  - Bash(head:*)
   - Bash(cat:*)
-  - Bash(awk:*)
-  - Bash(sed:*)
   - Bash(wc:*)
   - Bash(python3:*)
+  - Bash(timeout:*)
+  - Bash(mkdir:*)
+  - Bash(rm:*)
+  - Bash(date:*)
+  - Agent
+  - Read
+  - Write
 ---
 
-# Go Code Review Skill (v6.0.0)
+# Go Code Review Skill (v7.0.0)
 
 ## When to Use This Skill
 
@@ -31,6 +36,19 @@ This skill activates when users need help with:
 - Evaluating observability: logging strategy and error message quality
 - Reviewing naming conventions, code structure, and readability
 
+## CLI Parameters
+
+```
+/go-code-review [--branch <branch>] [--base <base>] [--output <file>] [--resume]
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--branch` | current branch | Source branch to review |
+| `--base` | `main` | Base branch to diff against |
+| `--output` | auto-generated | Output path for full report |
+| `--resume` | false | Resume an interrupted Loop-mode review |
+
 ## Architecture: Three-Tier Expert Review
 
 ```
@@ -38,59 +56,52 @@ This skill activates when users need help with:
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
-│  Tier 1: tools/run-go-tools.sh                      │  → diagnostics.json
-│  go build（编译错误, P0）                             │
-│  go vet（类型/格式检查, ~0 假阳性）                   │
-│  staticcheck（SSA 分析，可选安装）                    │
+│  Tier 1: golangci-lint（主）/ run-go-tools.sh（降级）  │  → findings-lint.md / diagnostics.json
+│  errcheck, govet, staticcheck, gosec, gocognit 等    │
 └─────────────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
 │  Tier 2: tools/scan-rules.sh                        │  → rule-hits.json
-│  修复后的 YAML 规则（兜底扫描）                       │
-│  预期 <50 条命中，假阳性大幅降低                       │
+│  57 条确定性正则规则（兜底扫描）                        │
 └─────────────────────────────────────────────────────┘
          │
          ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Tier 3: 7 个领域专家 Agent（并行）                         │
+│  Tier 3: 7 个领域专家 Agent（顺序执行）                     │
 │  🔴 safety      │ 安全与正确性，上下文并发判断              │
 │  🗄️  data        │ 数据层，N+1，序列化，类型语义             │
 │  🏗️  design      │ UNIX 7 原则，领域模型，代码变坏根源       │
-│  📐 quality     │ 综合 metrics.json，复杂度，可读性         │
+│  📐 quality     │ 综合 metrics，复杂度，可读性              │
 │  👁️  observability│ 日志分层策略，错误消息质量               │
 │  🧩 business    │ 业务需求推断，逻辑漏洞，边界缺失分析       │
 │  🏷️  naming      │ 命名语义准确性，一致性，Go 惯用法         │
 └──────────────────────────────────────────────────────────┘
          │
          ▼
-聚合：P0 → P1 → P2，去重，中文报告输出到 code_review.result
+聚合：tools/aggregate-findings.py → 去重 → 置信度过滤 → P0→P3 排序 → ≤15 条报告
 ```
 
-### Tier 1 — 量化分析工具
+### Tier 1 — golangci-lint（优先）
 
-Script: `tools/run-go-tools.sh`
-Output: `/tmp/diagnostics.json`
+Script: `tools/run-go-tools.sh`（golangci-lint 未安装时降级使用）
+Config: `tools/.golangci.yml`
+Output: `$SESSION_DIR/findings-lint.md`（golangci-lint 路径）或 `$SESSION_DIR/diagnostics.json`（降级路径）
 
-Runs per changed Go file:
-- `go build`（编译错误检测）
-- `go vet`（类型/格式问题）
-- `staticcheck`（SSA 静态分析，可选）
-- `gocognit`（认知复杂度，可选；>15 报告，>25 → P1，16-25 → P2）
-- 文件行数检测（threshold: 800 lines → `large_files`）
+golangci-lint 启用的 linters：errcheck, govet, staticcheck, ineffassign, unused, gosec, gocognit (>15), misspell
 
 ### Tier 2 — YAML 规则扫描
 
 Script: `tools/scan-rules.sh`
-Output: `/tmp/rule-hits.json`
+Output: `$SESSION_DIR/rule-hits.json`
 
-Scans against 38 deterministic regex rules across four YAML files:
-- `rules/safety.yaml` — SAFE-001 to SAFE-010
-- `rules/data.yaml` — DATA-001 to DATA-010
-- `rules/quality.yaml` — QUAL-001 to QUAL-010
-- `rules/observability.yaml` — OBS-001 to OBS-008
+Scans against 57 deterministic regex rules across four YAML files:
+- `rules/safety.yaml` — SAFE-001 to SAFE-014 (14 rules)
+- `rules/data.yaml` — DATA-001 to DATA-014 (14 rules)
+- `rules/quality.yaml` — QUAL-001 to QUAL-018 (18 rules)
+- `rules/observability.yaml` — OBS-001 to OBS-011 (11 rules)
 
-### Tier 3 — 7 个领域专家 Agent
+### Tier 3 — 7 个领域专家 Agent（顺序执行）
 
 | Agent | Expert Perspective |
 |-------|--------------------|
@@ -102,193 +113,407 @@ Scans against 38 deterministic regex rules across four YAML files:
 | business (orange) | 业务需求：实现的是用户真正需要的吗？ |
 | naming (magenta) | 命名质量：代码能自解释吗？ |
 
-Each agent receives the full code diff plus the subset of `rule-hits.json` relevant to its domain. Agents confirm Tier 2 hits with business context and surface additional judgment-based issues that regex cannot detect.
+**重要：** Tier 3 Agents 顺序（非并行）执行。每个 Agent 完成后 Claude 验证其 findings 文件存在再继续下一个。
+
+---
 
 ## Review Workflow
 
-### Step 1: 获取变更文件
+### 参数解析
+
+Claude 从 skill 调用参数中提取以下值（若未提供则使用默认值）：
 
 ```bash
-# --diff-filter=AM 只取新增(A)和修改(M)的文件，排除已删除文件避免工具报 "file not found"
-git diff master --name-only --diff-filter=AM | grep '\.go$'
-# 或针对特定 commit
-git diff HEAD~1 --name-only --diff-filter=AM | grep '\.go$'
+# 默认值
+SOURCE_BRANCH=$(git branch --show-current)
+BASE_BRANCH="main"
+OUTPUT_FILE=""
+RESUME=false
 
-# 设置 Session 目录（防止并发 review 相互覆盖）
-HEAD_SHA=$(git rev-parse HEAD | head -c 8)
+# 从 slash command 参数覆盖：
+# /go-code-review --branch feat/xxx --base develop --output report.md --resume
+```
+
+### --resume 处理（在所有步骤前执行）
+
+如果 `RESUME=true`：
+
+```bash
+if [ ! -f ".review/workflow-state.json" ]; then
+  echo "ERROR: 无中断审查可恢复（.review/workflow-state.json 不存在）"
+  exit 1
+fi
+
+SAVED_SHA=$(python3 -c "import json; d=json.load(open('.review/workflow-state.json')); print(d['head_sha'])")
+CURRENT_SHA=$(git rev-parse HEAD)
+
+if [ "$SAVED_SHA" != "$CURRENT_SHA" ]; then
+  echo "ERROR: 代码已变更（saved=$SAVED_SHA, current=$CURRENT_SHA），请重新执行完整审查"
+  exit 1
+fi
+
+PENDING=$(python3 -c "import json; d=json.load(open('.review/workflow-state.json')); print(len(d['pending_tasks']))")
+COMPLETED=$(python3 -c "import json; d=json.load(open('.review/workflow-state.json')); print(len(d['completed_tasks']))")
+echo "恢复中断审查（已完成 $COMPLETED 个 tasks，剩余 $PENDING 个）..."
+# 跳过步骤 1-3，从 pending_tasks 继续步骤 4 Loop
+```
+
+---
+
+### Step 1: 获取代码变更
+
+```bash
+echo "[1/6] 获取代码变更..."
+
+# 确认分支存在
+git rev-parse "$BASE_BRANCH" > /dev/null 2>&1 || { echo "ERROR: base branch '$BASE_BRANCH' not found"; exit 1; }
+git rev-parse "$SOURCE_BRANCH" > /dev/null 2>&1 || { echo "ERROR: source branch '$SOURCE_BRANCH' not found"; exit 1; }
+
+HEAD_SHA=$(git rev-parse "$SOURCE_BRANCH" | head -c 8)
 SESSION_DIR=".review/run-${HEAD_SHA}-$$"
 mkdir -p "$SESSION_DIR"
+
+# 获取 diff 和文件列表
+git diff "${BASE_BRANCH}...${SOURCE_BRANCH}" --diff-filter=AM > "$SESSION_DIR/diff.txt"
+git diff "${BASE_BRANCH}...${SOURCE_BRANCH}" --name-only --diff-filter=AM | grep '\.go$' > "$SESSION_DIR/files.txt"
+
+# git log（用于 Intent 节）
+git log --oneline -5 "${BASE_BRANCH}..${SOURCE_BRANCH}" > "$SESSION_DIR/gitlog.txt" 2>/dev/null || true
+
+# 统计
+DIFF_LINES=$(wc -l < "$SESSION_DIR/diff.txt")
+FILES_CHANGED=$(wc -l < "$SESSION_DIR/files.txt")
 ```
 
-### Step 1.5: 变更分流（Triage）
+**Checkpoint 1：**
+```bash
+test -s "$SESSION_DIR/diff.txt" || { echo "ERROR: diff is empty"; rm -rf "$SESSION_DIR"; exit 1; }
+test -s "$SESSION_DIR/files.txt" || { echo "ERROR: no Go files changed"; rm -rf "$SESSION_DIR"; exit 1; }
+echo "✓ diff=$DIFF_LINES 行，Go 文件=$FILES_CHANGED 个"
+```
 
-执行以下 Bash 命令判断本次变更的规模：
+---
+
+### Step 2: 变更分流（Triage）
 
 ```bash
-# 获取变更行数
-DIFF_LINES=$(git diff master --diff-filter=AM -- '*.go' | wc -l)
-# 获取变更文件数
-FILES_CHANGED=$(git diff master --name-only --diff-filter=AM | grep '\.go$' | wc -l)
-# 检查是否涉及敏感路径
-SENSITIVE=$(git diff master --name-only --diff-filter=AM | grep -E '(auth|crypto|payment|permission|admin)/' | wc -l)
+echo "[2/6] 变更分流..."
 
-echo "diff_lines=$DIFF_LINES files=$FILES_CHANGED sensitive=$SENSITIVE"
+CLASSIFICATION=$(python3 languages/go/tools/classify-diff.py \
+  --diff-lines "$DIFF_LINES" \
+  --files-changed "$FILES_CHANGED" \
+  --files "$(cat "$SESSION_DIR/files.txt" | tr '\n' ' ')" \
+  --diff-file "$SESSION_DIR/diff.txt")
+
+echo "$CLASSIFICATION" > "$SESSION_DIR/classification.json"
+
+TIER=$(echo "$CLASSIFICATION" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tier'])")
+RULES_SOURCE=$(echo "$CLASSIFICATION" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['rules_source'])")
+RULES_FILE=$(echo "$CLASSIFICATION" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rules_file',''))")
+
+echo "✓ $TIER 档，规则来源：$RULES_SOURCE"
 ```
 
-根据结果路由：
+**Trivial 档早退：**
+```bash
+if [ "$TIER" = "TRIVIAL" ]; then
+  echo "变更为文档/配置/注释类，无需深度审查。"
+  echo "变更摘要："
+  cat "$SESSION_DIR/gitlog.txt" | head -5
+  rm -rf "$SESSION_DIR"
+  exit 0
+fi
+```
 
-| 档位 | 条件 | 行为 |
-|------|------|------|
-| **Trivial** | `DIFF_LINES < 20` 且所有变更文件均为 `.md`/`.yaml`/`.yml`/`.json`/`.toml`/`.txt` 或仅注释行变更 | 跳过 Tier 1/2 扫描和全部 Agents，输出一句简短摘要说明变更内容，结束。 |
-| **Lite** | `20 <= DIFF_LINES < 400` 且 `FILES_CHANGED < 5` 且 `SENSITIVE == 0` | 执行 Tier 1/2 扫描 + 仅派发 3 个 Agent：safety、quality、observability |
-| **Full** | `DIFF_LINES >= 400` 或 `FILES_CHANGED >= 5` 或 `SENSITIVE > 0` | 执行 Tier 1/2 扫描 + 全量 7 个 Agent + Verifier |
+---
 
-> **注意**：Trivial 档 `.go` 文件中纯注释变更判断：`git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*(//|/\*)' | wc -l` 若输出为 0，视为纯注释变更。
-
-### Step 2: 运行 Tier 1 工具链分析
+### Step 3: 上下文组装
 
 ```bash
-git diff master --name-only --diff-filter=AM | grep '\.go$' | bash tools/run-go-tools.sh > /tmp/diagnostics.json
+echo "[3/6] 组装上下文..."
+
+python3 languages/go/tools/assemble-context.py \
+  --diff "$SESSION_DIR/diff.txt" \
+  --rules-source "$RULES_SOURCE" \
+  ${RULES_FILE:+--rules-file "$RULES_FILE"} \
+  --git-log "$SESSION_DIR/gitlog.txt" \
+  > "$SESSION_DIR/context-package.md" \
+  2> "$SESSION_DIR/context-meta.json"
+
+ASSEMBLE_EXIT=$?
+
+# 检测 change_set 截断警告（exit code 2）
+if [ "$ASSEMBLE_EXIT" -eq 2 ]; then
+  echo "WARNING: [Change Set] 被截断，降档为 Lite 处理"
+  TIER="LITE"
+fi
+
+echo "✓ Context Package 组装完成"
 ```
 
-读取 `/tmp/diagnostics.json`，记录：
-- `build_errors`：编译错误（P0，必须修复，来自 `go build`）
-- `vet_issues`：类型/格式问题（P0/P1，来自 `go vet`）
-- `staticcheck_issues`：SSA 分析结果（SA*→P0，S1*/ST1*→P2，来自 `staticcheck`，未安装则为空）
-- `large_files`：行数 > 800 的文件（参考数据）
+---
 
-如未安装 staticcheck 或 gocognit，可提前安装（可选，未安装时工具会跳过对应检查）：
+### Step 3.5: 架构预扫描（Full 档专属）
+
 ```bash
-go install honnef.co/go/tools/cmd/staticcheck@latest
-go install github.com/uudashr/gocognit/cmd/gocognit@latest
+if [ "$TIER" = "FULL" ]; then
+  echo "[3.5/6] 架构预扫描（Full 档）..."
+  FILES_LIST=$(cat "$SESSION_DIR/files.txt" | tr '\n' ' ')
+
+  timeout 30 python3 languages/go/tools/scan-architecture.py \
+    --files "$FILES_LIST" \
+    --gomod "go.mod" \
+    > "$SESSION_DIR/architecture-context.json" 2>/dev/null
+
+  if [ $? -eq 0 ] && [ -s "$SESSION_DIR/architecture-context.json" ]; then
+    MODULE_COUNT=$(python3 -c "import json; d=json.load(open('$SESSION_DIR/architecture-context.json')); print(len(d['module_map']))")
+    HIGH_RISK=$(python3 -c "import json; d=json.load(open('$SESSION_DIR/architecture-context.json')); print(','.join(d.get('high_risk_modules',[])))")
+
+    # 重新组装 Context Package（加入 Architecture Context）
+    python3 languages/go/tools/assemble-context.py \
+      --diff "$SESSION_DIR/diff.txt" \
+      --rules-source "$RULES_SOURCE" \
+      ${RULES_FILE:+--rules-file "$RULES_FILE"} \
+      --git-log "$SESSION_DIR/gitlog.txt" \
+      --architecture-context "$SESSION_DIR/architecture-context.json" \
+      > "$SESSION_DIR/context-package.md" \
+      2> "$SESSION_DIR/context-meta.json"
+
+    echo "✓ 识别 $MODULE_COUNT 个模块，高风险：${HIGH_RISK:-无}"
+  else
+    echo "⚠ 架构预扫描超时或跳过，继续执行"
+  fi
+fi
 ```
 
-### Step 3: 运行 Tier 2 规则扫描
+---
+
+### Step 4: 执行审查
 
 ```bash
-git diff master --name-only --diff-filter=AM | grep '\.go$' | bash tools/scan-rules.sh > /tmp/rule-hits.json
+echo "[4/6] 执行审查..."
 ```
 
-读取 `/tmp/rule-hits.json`。**实际 JSON 结构**：
+#### Tier 1 扫描
 
-```json
-{
-  "hits": [
-    {
-      "rule_id": "SAFE-001",
-      "severity": "P0",
-      "file": "service/user.go",
-      "line": 45,
-      "matched": "return fmt.Errorf(\"get user failed: %v\", err)",
-      "message": "禁止使用 fmt.Errorf() 创建错误..."
-    }
-  ],
-  "summary": { "total": 12, "P0": 3, "P1": 8, "P2": 1 }
+```bash
+if command -v golangci-lint > /dev/null 2>&1; then
+  FILES_LIST=$(cat "$SESSION_DIR/files.txt" | tr '\n' ' ')
+  golangci-lint run \
+    --output.json.path="$SESSION_DIR/lint-results.json" \
+    --config languages/go/tools/.golangci.yml \
+    $FILES_LIST 2>/dev/null || true
+
+  # 将 golangci-lint JSON 转换为 findings-lint.md
+  python3 languages/go/tools/aggregate-findings.py \
+    --lint-json "$SESSION_DIR/lint-results.json" \
+    --output "$SESSION_DIR/findings-lint.md" 2>/dev/null || true
+
+  echo "  ✓ golangci-lint 完成"
+else
+  # 降级：使用现有独立工具链
+  cat "$SESSION_DIR/files.txt" | bash languages/go/tools/run-go-tools.sh > "$SESSION_DIR/diagnostics.json" 2>/dev/null || true
+  echo "  ✓ go vet/build 完成（golangci-lint 未安装，使用降级路径）"
+fi
+
+# Tier 2 规则扫描（始终执行）
+cat "$SESSION_DIR/files.txt" | bash languages/go/tools/scan-rules.sh > "$SESSION_DIR/rule-hits.json" 2>/dev/null || true
+echo "  ✓ Tier 2 规则扫描完成"
+```
+
+#### Loop 模式判断
+
+```bash
+if [ "$TIER" = "FULL" ] && [ "$DIFF_LINES" -ge 400 ]; then
+  LOOP_MODE=true
+  echo "  → Loop 模式（diff_lines=$DIFF_LINES >= 400）"
+else
+  LOOP_MODE=false
+fi
+```
+
+#### 读取变更代码内容（供 Agent 分析）
+
+```bash
+DIFF_CONTENT=$(cat "$SESSION_DIR/diff.txt")
+CONTEXT_PACKAGE=$(cat "$SESSION_DIR/context-package.md")
+RULE_HITS=$(cat "$SESSION_DIR/rule-hits.json")
+AGENT_ROSTER=$(echo "$CLASSIFICATION" | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(d['agent_roster']))")
+```
+
+#### 顺序执行 Agents（普通模式，LOOP_MODE=false）
+
+对 `AGENT_ROSTER` 中每个 agent，**依次**执行以下步骤：
+
+1. 读取 `languages/go/agents/{agent}.md` 内容
+2. 调用 `Agent(agents/{agent}.md, prompt=<agent.md内容 + context-package.md内容>)`
+3. Agent 将 findings 写入 `$SESSION_DIR/findings-{agent}.md`
+4. **Checkpoint**：验证文件存在
+
+```bash
+# 对每个 agent（示例展示 safety，其余同理）：
+# Agent 接收：agent.md 内容 + Context Package
+# Agent 输出：$SESSION_DIR/findings-{agent}.md
+
+# Checkpoint（每个 agent 后执行）：
+test -f "$SESSION_DIR/findings-{agent}.md" || echo "WARNING: {agent} findings missing"
+```
+
+**具体 agent 输入说明：**
+
+- **safety agent** — Context Package + `$SESSION_DIR/diagnostics.json`（若存在）中的 build_errors/vet_issues + rule-hits.json 中 SAFE-001~014 命中
+- **data agent** — Context Package + rule-hits.json 中 DATA-001~014 命中
+- **design agent** — Context Package（无 Tier 2 规则）
+- **quality agent** — Context Package + `$SESSION_DIR/diagnostics.json` 中的 large_files + rule-hits.json 中 QUAL-001~018 命中
+- **observability agent** — Context Package + rule-hits.json 中 OBS-001~011 命中
+- **business agent** — Context Package（读取变更文件完整内容，非仅 diff）
+- **naming agent** — Context Package + rule-hits.json 中 QUAL-001/008/010 命名相关命中
+
+#### Loop 模式（LOOP_MODE=true，大型变更）
+
+```bash
+# 生成任务包
+python3 languages/go/tools/classify-diff.py \
+  --generate-task-packs \
+  --diff-file "$SESSION_DIR/diff.txt" \
+  --agent-roster "$AGENT_ROSTER" \
+  > "$SESSION_DIR/task-packs.json"
+
+# 初始化 workflow-state.json
+python3 -c "
+import json
+packs = json.load(open('$SESSION_DIR/task-packs.json'))
+state = {
+  'head_sha': '$(git rev-parse HEAD)',
+  'session_dir': '$SESSION_DIR',
+  'completed_tasks': [],
+  'in_progress_tasks': [],
+  'pending_tasks': [t['task_id'] for t in packs['tasks']],
+  'skipped_tasks': []
 }
+json.dump(state, open('.review/workflow-state.json', 'w'), ensure_ascii=False, indent=2)
+"
+
+echo "  → 共 $(python3 -c "import json; d=json.load(open('$SESSION_DIR/task-packs.json')); print(d['total_tasks'])") 个任务包"
 ```
 
-字段说明：`file`（文件路径）、`line`（行号）、`matched`（匹配的源码行）、`summary.total`（总命中数）。
+**Loop 执行**（对每个 `pending_tasks` 中的 task_id）：
 
-### Step 3.5: 列出 Agent 工具库
+1. 更新 `workflow-state.json`：移至 `in_progress`
+2. 读取任务包的 `files` 列表，生成该批文件的 sub-diff
+3. 调用对应 Agent（`task_id` 格式 `task-{pack}:{agent}`）
+4. Agent 输出追加到 `$SESSION_DIR/findings-{agent}.md`
+5. 更新 `workflow-state.json`：移至 `completed`（失败则移至 `skipped`，最多重试 2 次）
 
-在启动 agents 前，列出已沉淀的可复用工具，并将工具列表传给各 agent：
-
-```bash
-ls skills/go-code-review/tools/agents/*.sh skills/go-code-review/tools/agents/*.py 2>/dev/null || echo "（工具库为空）"
-```
-
-将输出传给所有 agents，提示他们优先复用已有工具。
-
-### Step 4: 读取代码内容，启动 Agent
-
-**先用 Bash 读取变更代码**，再将内容以文本形式传给 agents。
-
-```bash
-# 读取变更内容（供 agent 分析）
-git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=AM | grep '\.go$' | tr '\n' ' ')
-```
-
-各 agent 将输出写入 `$SESSION_DIR/findings-{agent}.md`（如 `$SESSION_DIR/findings-safety.md`）。
-
-根据 Step 1.5 分流结果派发 Agent：
-
-**Lite 档**（只派发 3 个 agent）：
-
-- **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
-- **quality agent** — 读取 diagnostics.json（large_files + staticcheck S1*/ST1*）；确认 QUAL-001~010 命中（命名语义类问题交由 naming agent 主责）
-- **observability agent** — 确认 OBS-001~008 命中；处理日志分层策略/错误消息质量
-
-**Full 档**（变更文件数 ≤ 30，全量 7 个 agent）：
-
-- **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
-- **data agent** — 确认 DATA-001~010 命中；处理 N+1/序列化/事务边界判断
-- **design agent** — 无 Tier 2 规则；专注 UNIX 7 原则 + 5 大代码变坏根源
-- **quality agent** — 读取 diagnostics.json（large_files + staticcheck S1*/ST1*）；确认 QUAL-001~010 命中（命名语义类问题交由 naming agent 主责）
-- **observability agent** — 确认 OBS-001~008 命中；处理日志分层策略/错误消息质量
-- **business agent** — 无 Tier 2 规则；读取变更文件**完整内容**（非仅 diff）；推断业务意图，识别业务逻辑漏洞、边界缺失、状态机错误、幂等性风险、权限归属缺漏
-- **naming agent** — 确认 QUAL-001/008/010 命名相关命中；深度审查所有标识符命名质量（语义准确性、一致性、Go 惯用法、上下文冗余）
-
-**Full 档**（变更文件数 > 30，大 diff 分批启动，避免上下文溢出和权限弹窗堆积）：
-- **第一批**（高风险域）：safety + data + business — 等三个 agent 返回后
-- **第二批**：design + quality + observability + naming
-
-**Verifier（仅 Full 档，所有专家 Agent 完成后）：**
-
-所有专家 findings 合并完成后，派发 Verifier agent 对 P0/P1 进行对抗性核实：
-
-Agent(agents/verifier.md, prompt=<verifier.md内容 + $SESSION_DIR/all-findings.md 中的P0/P1条目 + 代码变更内容>)
-
-Verifier 完成后：
-- `confirm` 条目：保留原严重度
-- `downgrade` 条目：按修订后严重度重新排序
-- `dismiss` 条目：从 findings 列表中移除
-
-### Step 5: 聚合输出
-
-合并所有 agent findings：
+#### Verifier（仅 Full 档，所有 Agent 完成后）
 
 ```bash
 cat "$SESSION_DIR"/findings-*.md > "$SESSION_DIR/all-findings.md"
+
+P0P1_COUNT=$(grep -c '\[P0\]\|\[P1\]' "$SESSION_DIR/all-findings.md" 2>/dev/null || echo 0)
+if [ "$P0P1_COUNT" -gt 0 ]; then
+  echo "  → 派发 Verifier（P0/P1 共 $P0P1_COUNT 条）..."
+  # 读取 verifier.md + context-package.md + all-findings.md 中 P0/P1 条目
+  # Agent(agents/verifier.md, prompt=<合并内容>)
+  # Verifier 输出写入 $SESSION_DIR/verifier-results.md
+  # 根据 confirm/downgrade/dismiss 更新 all-findings.md
+  echo "  ✓ Verifier 完成"
+fi
 ```
 
-收集所有 agent 输出后：
+---
 
-**review:ignore 过滤（聚合前）：**
-
-执行以下命令找出所有 `review:ignore` 注释行：
+### Step 5: 聚合与过滤
 
 ```bash
-git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep 'review:ignore'
+echo "[5/6] 聚合与过滤..."
+
+# 收集 review:ignore 标记（格式：category:file:line）
+IGNORE_FLAGS=$(git diff "${BASE_BRANCH}...${SOURCE_BRANCH}" --diff-filter=AM -- '*.go' | \
+  grep '^+' | grep 'review:ignore' | \
+  python3 -c "
+import sys, re
+lines = sys.stdin.read().splitlines()
+flags = []
+for line in lines:
+    m = re.search(r'review:ignore\s+(\w+)', line)
+    if m:
+        flags.append(m.group(1))
+print(','.join(flags))
+" 2>/dev/null || true)
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+REPORT_FILE=".review/results/review-${TIMESTAMP}.md"
+mkdir -p .review/results
+
+python3 languages/go/tools/aggregate-findings.py \
+  --findings-dir "$SESSION_DIR" \
+  ${RULES_FILE:+--redlines-file "$RULES_FILE"} \
+  ${IGNORE_FLAGS:+--review-ignore-flags "$IGNORE_FLAGS"} \
+  --max-output 15 \
+  --output "$REPORT_FILE"
 ```
 
-格式：`// review:ignore <category>` 其中 category 为：`security`、`performance`、`architecture`、`style`、`quality`、`data`
+**Checkpoint 5：**
+```bash
+test -f "$REPORT_FILE" || { echo "ERROR: report generation failed"; exit 1; }
+FINDING_COUNT=$(grep -c '^### \[P' "$REPORT_FILE" 2>/dev/null || echo 0)
+echo "✓ 过滤后 $FINDING_COUNT 条（覆盖 $FILES_CHANGED 个文件）"
+```
 
-Category 与 Rule 前缀的映射：
-- `security` → 过滤 SAFE-* findings
-- `data` → 过滤 DATA-* findings
-- `quality` / `style` → 过滤 QUAL-* findings
-- `architecture` → 过滤 ARCH-* findings (如有)
-- `performance` → 过滤 PERF-* findings (如有)
-
-对于标记了 `review:ignore` 的行，跳过该行对应 category 的 findings。
-
-1. 合并 Tier 2 命中（已在 rule-hits.json 中）和 agent 补充的判断性问题
-2. 去重：同一位置的问题只保留最高严重度
-3. 按 P0 → P1 → P2 排序
-4. 输出到 `code_review.result`
-
-**输出截断（最终步骤）：**
-
-按 P0 → P1 → P2 排序后，**只输出前 15 条**。若总 findings 超过 15 条，在终端摘要行添加：
-`（另有 N 条问题因数量限制未显示，使用 --output report.md 查看完整报告）`
-
-若使用了 `--output` 参数，完整 findings（含超出 15 条部分）写入报告文件的 `## Appendix` 节。
-
-审查完成后清理 session 目录：
+#### Coordinator Agent（生成 Review Assumptions）
 
 ```bash
+CONTEXT_PACKAGE=$(cat "$SESSION_DIR/context-package.md")
+FILTERED_FINDINGS=$(cat "$REPORT_FILE")
+COVERAGE_SUMMARY="files_reviewed: $FILES_CHANGED / $FILES_CHANGED
+skipped: 无
+rules_source: $RULES_SOURCE${RULES_FILE:+（$RULES_FILE）}
+tier: $TIER"
+
+# Agent(agents/coordinator.md, prompt=<三部分内容>):
+# 1. [Context Package]   → $CONTEXT_PACKAGE
+# 2. [Filtered Findings] → $FILTERED_FINDINGS
+# 3. [Coverage Summary]  → $COVERAGE_SUMMARY
+# Coordinator 输出写入 $SESSION_DIR/final-report.md
+
+if [ -f "$SESSION_DIR/final-report.md" ]; then
+  cp "$SESSION_DIR/final-report.md" "$REPORT_FILE"
+  echo "  ✓ Coordinator 生成 Review Assumptions 完成"
+else
+  echo "  ⚠ Coordinator 未输出，使用聚合报告"
+fi
+```
+
+---
+
+### Step 6: 输出结果与清理
+
+```bash
+echo "[6/6] 输出结果..."
+
+# 终端输出报告内容
+cat "$REPORT_FILE"
+
+# 如果指定了 --output，复制完整报告到目标路径
+if [ -n "$OUTPUT_FILE" ]; then
+  cp "$REPORT_FILE" "$OUTPUT_FILE"
+  echo ""
+  echo "完整报告已保存：$OUTPUT_FILE"
+fi
+
+echo "完整报告：$REPORT_FILE"
+
+# 清理 session 目录
 rm -rf "$SESSION_DIR"
+
+# Loop 模式：清理 workflow-state.json
+if [ "$LOOP_MODE" = "true" ]; then
+  rm -f ".review/workflow-state.json"
+fi
 ```
+
+---
 
 ## Output Format
 
@@ -305,31 +530,34 @@ rm -rf "$SESSION_DIR"
 | P1（强烈建议） | X 个 |
 | P2（建议优化） | X 个 |
 
-## 量化违规（Tier 1）
+## P0（必须修复）
 
-（来自 metrics.json，由 quality agent 报告）
+### [P0] SAFE-003 · path/to/file.go:行号
+**来源**: safety
+**置信度**: 0.98
+**needs_clarification**: null
 
-## P0 问题（必须修复）
-
-### 问题 - [P0] <问题类别>（来自：<agent名称>/<rule-id>）
-**位置**: path/to/file.go:行号
-**类别**: <具体类别>
-**原始代码**:
-```go
-// 问题代码
-```
 **问题描述**: <中文说明>
+
 **修改建议**:
 ```go
 // 修复代码
 ```
 
-## P1 问题（强烈建议）
+## P1（强烈建议）
 ...
 
-## P2 问题（建议优化）
+## P2（建议优化）
 ...
+
+## Appendix
+*（若总 findings > 15，将剩余条目放入此节）*
 ```
+
+若总 findings 超过 15 条，终端摘要行添加：
+`（另有 N 条问题因数量限制未显示，完整报告见 {REPORT_FILE}）`
+
+---
 
 ## Manual Agent Invocation
 
@@ -343,4 +571,19 @@ Individual agents can be invoked directly without running the full orchestrator:
 直接调用 observability agent
 直接调用 business agent
 直接调用 naming agent
+```
+
+---
+
+## Optional Tool Installation
+
+golangci-lint（推荐，未安装时自动降级）:
+```bash
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+```
+
+其他可选工具（golangci-lint 降级路径使用）:
+```bash
+go install honnef.co/go/tools/cmd/staticcheck@latest
+go install github.com/uudashr/gocognit/cmd/gocognit@latest
 ```

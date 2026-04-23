@@ -42,24 +42,33 @@ tools: ["Read", "Grep", "Glob"]
 
 ## 工具输入
 
-**优先读取 `/tmp/diagnostics.json`：**
+**优先读取 `$SESSION_DIR/diagnostics.json`（golangci-lint 降级路径）或 `$SESSION_DIR/findings-lint.md`（golangci-lint 路径）：**
 - `build_errors` → 所有条目直接报告为 P0（编译无法通过）
 - `vet_issues` 含关键词 "copylock"/"assign to entry in nil map"/"nilness" → P0；其余 → P1
 - `staticcheck_issues` 含 SA 代码（SA4006/SA4023 等）→ P0；S1/ST1 代码 → P2
 
-**再读取 `/tmp/rule-hits.json`，筛选 SAFE-* 命中：**
+**再读取 `$SESSION_DIR/rule-hits.json`，筛选 SAFE-* 命中：**
 按以下规则过滤假阳性后再报告：
 - SAFE-001 命中但匹配行含 `%w` → 忽略（`fmt.Errorf("%w", err)` 是正确错误包装）
 - SAFE-002 命中但文件名以 `_test.go` 结尾 → 忽略（测试辅助 panic 是正常用法）
 - diagnostics.json 已报告的同一位置问题 → 去重，只保留最高严重度
 
 **其他输入：**
-- `metrics.json`（来自 Tier 1 analyze-go.sh）
 - 变更代码内容（由 orchestrator 以文本形式传入，无需自行执行 git 命令）
 
 ## 工具使用
 
 可以使用 `Read`、`Grep`、`Bash` 工具探索代码。
+
+### 读取溯源（必须）
+
+**每次使用 Read 工具读取文件后，必须立即在 response 中输出一行溯源记录**，格式：
+
+```
+[已读取] path/to/file.go L起始-L结束
+```
+
+**禁止跳过此步骤。** 每条 finding 必须能溯源到实际读取的行号，这是防止「跳过阅读直接输出结论」的机制。若读取了多个文件，每个文件单独一行记录。
 
 ### 工具沉淀约定
 
@@ -301,10 +310,12 @@ if err := errGroup.Wait(); err != nil {
 
 **重要**: 所有问题描述和建议必须使用中文输出。
 
-按如下格式报告（用中文）：
+按如下格式报告每个问题（用中文）：
 
-### 问题 - [P0/P1/P2] <问题类别>
-**位置**: path/to/file.go:行号
+### [P0] SAFE-NNN · path/to/file.go:行号
+
+**<问题标题（一句话）>**
+
 **类别**: <具体类别，如：goroutine泄漏 / 竞态条件 / 上下文断链 / 防御性编程>
 **原始代码**:
 ```go
@@ -315,3 +326,7 @@ if err := errGroup.Wait(); err != nil {
 ```go
 // 修复代码
 ```
+**置信度:** 0.95
+**needs_clarification:** null
+
+> `needs_clarification` 字段：若无法独立判定（如需了解调用方语义），填写具体问题；确定成立则填 `null`。
