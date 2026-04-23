@@ -38,7 +38,12 @@ htmlcov/
 
 # Review results
 .review/results/
+.review/run-*/
+.review/workflow-state.json
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Worktrees
+.worktrees/

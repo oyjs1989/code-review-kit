@@ -50,6 +50,16 @@ tools: ["Read", "Grep", "Glob"]
 
 可以使用 `Read`、`Grep`、`Bash` 工具探索代码。
 
+### 读取溯源（必须）
+
+**每次使用 Read 工具读取文件后，必须立即在 response 中输出一行溯源记录**，格式：
+
+```
+[已读取] path/to/file.go L起始-L结束
+```
+
+**禁止跳过此步骤。** 每条 finding 必须能溯源到实际读取的行号，这是防止「跳过阅读直接输出结论」的机制。若读取了多个文件，每个文件单独一行记录。
+
 ### 工具沉淀约定
 
 每次 review 沉淀工具，而不是写一次性临时脚本：
@@ -110,11 +120,10 @@ tools: ["Read", "Grep", "Glob"]
 
 ## 读取 diagnostics.json
 
-读取 `/tmp/diagnostics.json`：
+读取 `$SESSION_DIR/diagnostics.json`（golangci-lint 降级路径）或 `$SESSION_DIR/findings-lint.md`（golangci-lint 路径）：
 - `large_files` → 超过 800 行的文件（列出文件名和行数）
 - `staticcheck_issues` 含 S1*/ST1* 代码 → P2 代码风格建议
 - `cognitive_complexity` → 认知复杂度超阈值的函数（score >25 → P1，16-25 → P2）
-不再读取 `/tmp/metrics.json`（已废弃）
 
 **在输出开头，必须先输出量化摘要**：
 
@@ -444,10 +453,12 @@ type User struct {
 
 然后按如下格式报告每个问题（用中文）：
 
-### 问题 - [P0/P1/P2] <问题类别>
-**位置**: path/to/file.go:行号
+### [P1] QUAL-NNN · path/to/file.go:行号
+
+**<问题标题（一句话）>**
+
 **类别**: <具体类别，如：命名不清 / 函数过长 / 嵌套过深 / 魔法数字 / 注释缺失>
-**度量数据**: `diagnostics.json` 中的相关数据（如适用）
+**度量数据**: `$SESSION_DIR/diagnostics.json` 中的相关数据（如适用）
 **原始代码**:
 ```go
 // 问题代码
@@ -457,3 +468,7 @@ type User struct {
 ```go
 // 修复代码
 ```
+**置信度:** 0.88
+**needs_clarification:** null
+
+> `needs_clarification` 字段：若质量判断依赖上下文，填写具体问题；确定成立则填 `null`。
