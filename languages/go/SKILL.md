@@ -239,10 +239,37 @@ Verifier 完成后：
 ### Step 5: 聚合输出
 
 收集所有 agent 输出后：
+
+**review:ignore 过滤（聚合前）：**
+
+执行以下命令找出所有 `review:ignore` 注释行：
+
+```bash
+git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep 'review:ignore'
+```
+
+格式：`// review:ignore <category>` 其中 category 为：`security`、`performance`、`architecture`、`style`、`quality`、`data`
+
+Category 与 Rule 前缀的映射：
+- `security` → 过滤 SAFE-* findings
+- `data` → 过滤 DATA-* findings
+- `quality` / `style` → 过滤 QUAL-* findings
+- `architecture` → 过滤 ARCH-* findings (如有)
+- `performance` → 过滤 PERF-* findings (如有)
+
+对于标记了 `review:ignore` 的行，跳过该行对应 category 的 findings。
+
 1. 合并 Tier 2 命中（已在 rule-hits.json 中）和 agent 补充的判断性问题
 2. 去重：同一位置的问题只保留最高严重度
 3. 按 P0 → P1 → P2 排序
 4. 输出到 `code_review.result`
+
+**输出截断（最终步骤）：**
+
+按 P0 → P1 → P2 排序后，**只输出前 15 条**。若总 findings 超过 15 条，在终端摘要行添加：
+`（另有 N 条问题因数量限制未显示，使用 --output report.md 查看完整报告）`
+
+若使用了 `--output` 参数，完整 findings（含超出 15 条部分）写入报告文件的 `## Appendix` 节。
 
 ## Output Format
 
