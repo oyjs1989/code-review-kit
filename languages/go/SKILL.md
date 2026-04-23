@@ -17,7 +17,7 @@ allowed-tools:
   - Bash(python3:*)
 ---
 
-# Go Code Review Skill (v4.0.0)
+# Go Code Review Skill (v6.0.0)
 
 ## When to Use This Skill
 
@@ -113,7 +113,37 @@ Each agent receives the full code diff plus the subset of `rule-hits.json` relev
 git diff master --name-only --diff-filter=AM | grep '\.go$'
 # 或针对特定 commit
 git diff HEAD~1 --name-only --diff-filter=AM | grep '\.go$'
+
+# 设置 Session 目录（防止并发 review 相互覆盖）
+HEAD_SHA=$(git rev-parse HEAD | head -c 8)
+SESSION_DIR=".review/run-${HEAD_SHA}-$$"
+mkdir -p "$SESSION_DIR"
 ```
+
+### Step 1.5: 变更分流（Triage）
+
+执行以下 Bash 命令判断本次变更的规模：
+
+```bash
+# 获取变更行数
+DIFF_LINES=$(git diff master --diff-filter=AM -- '*.go' | wc -l)
+# 获取变更文件数
+FILES_CHANGED=$(git diff master --name-only --diff-filter=AM | grep '\.go$' | wc -l)
+# 检查是否涉及敏感路径
+SENSITIVE=$(git diff master --name-only --diff-filter=AM | grep -E '(auth|crypto|payment|permission|admin)/' | wc -l)
+
+echo "diff_lines=$DIFF_LINES files=$FILES_CHANGED sensitive=$SENSITIVE"
+```
+
+根据结果路由：
+
+| 档位 | 条件 | 行为 |
+|------|------|------|
+| **Trivial** | `DIFF_LINES < 20` 且所有变更文件均为 `.md`/`.yaml`/`.yml`/`.json`/`.toml`/`.txt` 或仅注释行变更 | 跳过 Tier 1/2 扫描和全部 Agents，输出一句简短摘要说明变更内容，结束。 |
+| **Lite** | `20 <= DIFF_LINES < 400` 且 `FILES_CHANGED < 5` 且 `SENSITIVE == 0` | 执行 Tier 1/2 扫描 + 仅派发 3 个 Agent：safety、quality、observability |
+| **Full** | `DIFF_LINES >= 400` 或 `FILES_CHANGED >= 5` 或 `SENSITIVE > 0` | 执行 Tier 1/2 扫描 + 全量 7 个 Agent + Verifier |
+
+> **注意**：Trivial 档 `.go` 文件中纯注释变更判断：`git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*(//|/\*)' | wc -l` 若输出为 0，视为纯注释变更。
 
 ### Step 2: 运行 Tier 1 工具链分析
 
@@ -178,7 +208,17 @@ ls skills/go-code-review/tools/agents/*.sh skills/go-code-review/tools/agents/*.
 git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=AM | grep '\.go$' | tr '\n' ' ')
 ```
 
-**变更文件数 ≤ 30**：并行启动全部 7 个 agent：
+各 agent 将输出写入 `$SESSION_DIR/findings-{agent}.md`（如 `$SESSION_DIR/findings-safety.md`）。
+
+根据 Step 1.5 分流结果派发 Agent：
+
+**Lite 档**（只派发 3 个 agent）：
+
+- **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
+- **quality agent** — 读取 diagnostics.json（large_files + staticcheck S1*/ST1*）；确认 QUAL-001~010 命中（命名语义类问题交由 naming agent 主责）
+- **observability agent** — 确认 OBS-001~008 命中；处理日志分层策略/错误消息质量
+
+**Full 档**（变更文件数 ≤ 30，全量 7 个 agent）：
 
 - **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
 - **data agent** — 确认 DATA-001~010 命中；处理 N+1/序列化/事务边界判断
@@ -188,24 +228,74 @@ git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=
 - **business agent** — 无 Tier 2 规则；读取变更文件**完整内容**（非仅 diff）；推断业务意图，识别业务逻辑漏洞、边界缺失、状态机错误、幂等性风险、权限归属缺漏
 - **naming agent** — 确认 QUAL-001/008/010 命名相关命中；深度审查所有标识符命名质量（语义准确性、一致性、Go 惯用法、上下文冗余）
 
-**变更文件数 > 30**（大 diff 分批启动，避免上下文溢出和权限弹窗堆积）：
+**Full 档**（变更文件数 > 30，大 diff 分批启动，避免上下文溢出和权限弹窗堆积）：
 - **第一批**（高风险域）：safety + data + business — 等三个 agent 返回后
 - **第二批**：design + quality + observability + naming
 
+**Verifier（仅 Full 档，所有专家 Agent 完成后）：**
+
+所有专家 findings 合并完成后，派发 Verifier agent 对 P0/P1 进行对抗性核实：
+
+Agent(agents/verifier.md, prompt=<verifier.md内容 + $SESSION_DIR/all-findings.md 中的P0/P1条目 + 代码变更内容>)
+
+Verifier 完成后：
+- `confirm` 条目：保留原严重度
+- `downgrade` 条目：按修订后严重度重新排序
+- `dismiss` 条目：从 findings 列表中移除
+
 ### Step 5: 聚合输出
 
+合并所有 agent findings：
+
+```bash
+cat "$SESSION_DIR"/findings-*.md > "$SESSION_DIR/all-findings.md"
+```
+
 收集所有 agent 输出后：
+
+**review:ignore 过滤（聚合前）：**
+
+执行以下命令找出所有 `review:ignore` 注释行：
+
+```bash
+git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep 'review:ignore'
+```
+
+格式：`// review:ignore <category>` 其中 category 为：`security`、`performance`、`architecture`、`style`、`quality`、`data`
+
+Category 与 Rule 前缀的映射：
+- `security` → 过滤 SAFE-* findings
+- `data` → 过滤 DATA-* findings
+- `quality` / `style` → 过滤 QUAL-* findings
+- `architecture` → 过滤 ARCH-* findings (如有)
+- `performance` → 过滤 PERF-* findings (如有)
+
+对于标记了 `review:ignore` 的行，跳过该行对应 category 的 findings。
+
 1. 合并 Tier 2 命中（已在 rule-hits.json 中）和 agent 补充的判断性问题
 2. 去重：同一位置的问题只保留最高严重度
 3. 按 P0 → P1 → P2 排序
 4. 输出到 `code_review.result`
+
+**输出截断（最终步骤）：**
+
+按 P0 → P1 → P2 排序后，**只输出前 15 条**。若总 findings 超过 15 条，在终端摘要行添加：
+`（另有 N 条问题因数量限制未显示，使用 --output report.md 查看完整报告）`
+
+若使用了 `--output` 参数，完整 findings（含超出 15 条部分）写入报告文件的 `## Appendix` 节。
+
+审查完成后清理 session 目录：
+
+```bash
+rm -rf "$SESSION_DIR"
+```
 
 ## Output Format
 
 **重要**：所有审查输出必须使用中文。
 
 ```markdown
-# Go 代码审查报告（v5.0.0）
+# Go 代码审查报告
 
 ## 审查摘要
 
