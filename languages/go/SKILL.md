@@ -113,6 +113,11 @@ Each agent receives the full code diff plus the subset of `rule-hits.json` relev
 git diff master --name-only --diff-filter=AM | grep '\.go$'
 # 或针对特定 commit
 git diff HEAD~1 --name-only --diff-filter=AM | grep '\.go$'
+
+# 设置 Session 目录（防止并发 review 相互覆盖）
+HEAD_SHA=$(git rev-parse HEAD | head -c 8)
+SESSION_DIR=".review/run-${HEAD_SHA}-$$"
+mkdir -p "$SESSION_DIR"
 ```
 
 ### Step 1.5: 变更分流（Triage）
@@ -203,6 +208,8 @@ ls skills/go-code-review/tools/agents/*.sh skills/go-code-review/tools/agents/*.
 git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=AM | grep '\.go$' | tr '\n' ' ')
 ```
 
+各 agent 将输出写入 `$SESSION_DIR/findings-{agent}.md`（如 `$SESSION_DIR/findings-safety.md`）。
+
 根据 Step 1.5 分流结果派发 Agent：
 
 **Lite 档**（只派发 3 个 agent）：
@@ -238,6 +245,12 @@ Verifier 完成后：
 
 ### Step 5: 聚合输出
 
+合并所有 agent findings：
+
+```bash
+cat "$SESSION_DIR"/findings-*.md > "$SESSION_DIR/all-findings.md"
+```
+
 收集所有 agent 输出后：
 
 **review:ignore 过滤（聚合前）：**
@@ -270,6 +283,12 @@ Category 与 Rule 前缀的映射：
 `（另有 N 条问题因数量限制未显示，使用 --output report.md 查看完整报告）`
 
 若使用了 `--output` 参数，完整 findings（含超出 15 条部分）写入报告文件的 `## Appendix` 节。
+
+审查完成后清理 session 目录：
+
+```bash
+rm -rf "$SESSION_DIR"
+```
 
 ## Output Format
 
