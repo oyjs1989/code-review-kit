@@ -115,6 +115,31 @@ git diff master --name-only --diff-filter=AM | grep '\.go$'
 git diff HEAD~1 --name-only --diff-filter=AM | grep '\.go$'
 ```
 
+### Step 1.5: 变更分流（Triage）
+
+执行以下 Bash 命令判断本次变更的规模：
+
+```bash
+# 获取变更行数
+DIFF_LINES=$(git diff master --diff-filter=AM -- '*.go' | wc -l)
+# 获取变更文件数
+FILES_CHANGED=$(git diff master --name-only --diff-filter=AM | grep '\.go$' | wc -l)
+# 检查是否涉及敏感路径
+SENSITIVE=$(git diff master --name-only --diff-filter=AM | grep -E '(auth|crypto|payment|permission|admin)/' | wc -l)
+
+echo "diff_lines=$DIFF_LINES files=$FILES_CHANGED sensitive=$SENSITIVE"
+```
+
+根据结果路由：
+
+| 档位 | 条件 | 行为 |
+|------|------|------|
+| **Trivial** | `DIFF_LINES < 20` 且所有变更文件均为 `.md`/`.yaml`/`.yml`/`.json`/`.toml`/`.txt` 或仅注释行变更 | 跳过 Tier 1/2 扫描和全部 Agents，输出一句简短摘要说明变更内容，结束。 |
+| **Lite** | `20 <= DIFF_LINES < 400` 且 `FILES_CHANGED < 5` 且 `SENSITIVE == 0` | 执行 Tier 1/2 扫描 + 仅派发 3 个 Agent：safety、quality、observability |
+| **Full** | `DIFF_LINES >= 400` 或 `FILES_CHANGED >= 5` 或 `SENSITIVE > 0` | 执行 Tier 1/2 扫描 + 全量 7 个 Agent + Verifier |
+
+> **注意**：Trivial 档 `.go` 文件中纯注释变更判断：`git diff master --diff-filter=AM -- '*.go' | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*(//|/\*)' | wc -l` 若输出为 0，视为纯注释变更。
+
 ### Step 2: 运行 Tier 1 工具链分析
 
 ```bash
@@ -178,7 +203,15 @@ ls skills/go-code-review/tools/agents/*.sh skills/go-code-review/tools/agents/*.
 git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=AM | grep '\.go$' | tr '\n' ' ')
 ```
 
-**变更文件数 ≤ 30**：并行启动全部 7 个 agent：
+根据 Step 1.5 分流结果派发 Agent：
+
+**Lite 档**（只派发 3 个 agent）：
+
+- **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
+- **quality agent** — 读取 diagnostics.json（large_files + staticcheck S1*/ST1*）；确认 QUAL-001~010 命中（命名语义类问题交由 naming agent 主责）
+- **observability agent** — 确认 OBS-001~008 命中；处理日志分层策略/错误消息质量
+
+**Full 档**（变更文件数 ≤ 30，全量 7 个 agent）：
 
 - **safety agent** — 读取 diagnostics.json（build_errors + vet_issues + staticcheck SA*）；确认 rule-hits.json 中 SAFE-001~010 命中（按规则说明过滤假阳性）
 - **data agent** — 确认 DATA-001~010 命中；处理 N+1/序列化/事务边界判断
@@ -188,9 +221,20 @@ git diff master --diff-filter=AM -- $(git diff master --name-only --diff-filter=
 - **business agent** — 无 Tier 2 规则；读取变更文件**完整内容**（非仅 diff）；推断业务意图，识别业务逻辑漏洞、边界缺失、状态机错误、幂等性风险、权限归属缺漏
 - **naming agent** — 确认 QUAL-001/008/010 命名相关命中；深度审查所有标识符命名质量（语义准确性、一致性、Go 惯用法、上下文冗余）
 
-**变更文件数 > 30**（大 diff 分批启动，避免上下文溢出和权限弹窗堆积）：
+**Full 档**（变更文件数 > 30，大 diff 分批启动，避免上下文溢出和权限弹窗堆积）：
 - **第一批**（高风险域）：safety + data + business — 等三个 agent 返回后
 - **第二批**：design + quality + observability + naming
+
+**Verifier（仅 Full 档，所有专家 Agent 完成后）：**
+
+所有专家 findings 合并完成后，派发 Verifier agent 对 P0/P1 进行对抗性核实：
+
+Agent(agents/verifier.md, prompt=<verifier.md内容 + $SESSION_DIR/all-findings.md 中的P0/P1条目 + 代码变更内容>)
+
+Verifier 完成后：
+- `confirm` 条目：保留原严重度
+- `downgrade` 条目：按修订后严重度重新排序
+- `dismiss` 条目：从 findings 列表中移除
 
 ### Step 5: 聚合输出
 
