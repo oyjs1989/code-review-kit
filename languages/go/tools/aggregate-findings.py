@@ -397,6 +397,38 @@ def apply_fuzzy_cap(
     return kept
 
 
+def auto_verify(findings: list, rule_hits: dict) -> None:
+    """
+    Deterministic verifier: adjust confidence based on Tier2 rule hit correlation.
+    Only affects P0/P1 findings with confidence < 0.92.
+    Mutates findings in-place.
+    """
+    CONFIDENCE_CEILING = 0.92
+    DOWNGRADE_AMOUNT = 0.10
+    SAFE_DATA_PREFIXES = ('SAFE-', 'DATA-')
+
+    # Build lookup: {(rule_id, filepath): [line_numbers]}
+    hit_index: dict[tuple, list[int]] = {}
+    for hit in rule_hits.get('hits', []):
+        key = (hit.get('rule_id', ''), hit.get('file', ''))
+        hit_index.setdefault(key, []).append(hit.get('line', 0))
+
+    for f in findings:
+        if f.severity not in ('P0', 'P1'):
+            continue
+        if f.confidence >= CONFIDENCE_CEILING:
+            continue
+
+        key = (f.rule_id, f.filepath)
+        matched_lines = hit_index.get(key, [])
+
+        if matched_lines:
+            if any(abs(f.line_start - ln) <= ADJACENT_LINE_THRESHOLD for ln in matched_lines):
+                f.confidence = 1.0
+        elif any(f.rule_id.startswith(p) for p in SAFE_DATA_PREFIXES):
+            f.confidence = max(0.0, f.confidence - DOWNGRADE_AMOUNT)
+
+
 # ── golangci-lint JSON conversion ───────────────────────────────────────────────
 
 def convert_lint_json(lint_json_file: str) -> list:
@@ -558,6 +590,7 @@ def aggregate(
     output_file: str,
     classification_file: str | None = None,
     context_meta_file: str | None = None,
+    rule_hits_file: str | None = None,
 ) -> None:
     """Full aggregation pipeline."""
     findings_dir_path = Path(findings_dir)
@@ -588,6 +621,14 @@ def aggregate(
     if redlines_file:
         redline_ids = load_redline_rule_ids(redlines_file)
         apply_redlines(findings, redline_ids)
+
+    # Step 2.5: Auto-verify (replaces Verifier agent)
+    if rule_hits_file and Path(rule_hits_file).exists():
+        try:
+            rule_hits = json.loads(Path(rule_hits_file).read_text())
+            auto_verify(findings, rule_hits)
+        except json.JSONDecodeError:
+            print(f'WARN: failed to parse {rule_hits_file}', file=sys.stderr)
 
     # Step 4: review:ignore filter
     findings = apply_review_ignore(findings, review_ignore_flags)
@@ -661,6 +702,8 @@ def main():
                         help='Path to classification.json (enables review assumptions section)')
     parser.add_argument('--context-meta-file', default='',
                         help='Path to context-meta.json (enables review assumptions section)')
+    parser.add_argument('--rule-hits-file', default='',
+                        help='Path to rule-hits.json from scan-rules.sh (enables auto-verify)')
 
     args = parser.parse_args()
 
@@ -684,6 +727,7 @@ def main():
         output_file=args.output,
         classification_file=args.classification_file or None,
         context_meta_file=args.context_meta_file or None,
+        rule_hits_file=args.rule_hits_file or None,
     )
 
 
