@@ -246,3 +246,127 @@ rules:
             return errors.Errorf("unknown provider: %s", provider)
         }
         return handler(data)
+
+  # 规则说明: proto 消息字段应使用官方辅助函数，vars.ToPtr 是项目私有包装器语义不清晰
+  - id: QUAL-019
+    name: Proto 字段应使用 proto.String()/proto.Int32() 而非 vars.ToPtr()
+    severity: P1
+    pattern:
+      type: regex
+      match: 'vars\.ToPtr\('
+    message: "构造 proto 消息时，应使用官方 proto.String()、proto.Int32()、proto.Int64() 等辅助函数，而非项目私有的 vars.ToPtr() 包装器。proto 官方辅助函数语义清晰，是所有 Go protobuf 开发者的通用语言，IDE 能正确识别其类型关联。vars.ToPtr 作为通用指针转换工具，在 proto 上下文中语义不够直观。"
+    examples:
+      bad: "req := &pb.GetMainAccountListReq{\n    Alias: vars.ToPtr(alias),\n    Page:  &page,\n}"
+      good: "req := &pb.GetMainAccountListReq{\n    Alias: proto.String(alias),\n    Page:  proto.Int32(page),\n}"
+
+  # 规则说明: Controller Response 直接使用 proto 类型会将 API 契约与 proto 传输层耦合
+  # NOTE: 误报率中等，agent 需确认是在 controller/response struct 字段中，而非 RPC 调用内部变量
+  - id: QUAL-020
+    name: Controller Response 结构体禁止直接使用 proto 生成类型字段
+    severity: P1
+    pattern:
+      type: regex
+      match: '\[\]\*pb\.[A-Z][a-zA-Z0-9]*\b[^(]'
+    message: "Controller 的 Response 结构体中禁止直接使用 proto 生成类型（如 []*pb.SomeMessage）作为字段类型。应使用业务对象（BO）类型，解耦 HTTP API 契约和 proto 传输层。直接暴露 proto 类型会导致：API 格式随 proto 定义意外变化、proto 的驼峰 JSON 序列化规则与预期不符。"
+    examples:
+      bad: "type Response struct {\n    DataList []*pb.DepartPermissionItem `json:\"data_list\"`\n}"
+      good: "type Response struct {\n    DataList []*bo.DepartPermissionItem `json:\"data_list\"`\n}"
+
+  # 规则说明: 返回错误应使用静态消息，动态上下文通过 log.Error 结构化字段记录，而非嵌入错误消息
+  - id: QUAL-021
+    name: return 语句禁止用 errors.Errorf 嵌入动态上下文值
+    severity: P1
+    pattern:
+      type: regex
+      match: 'return\b.*errors\.Errorf\('
+    message: "禁止在 return 语句中用 errors.Errorf(\"... %s ...\", dynamicValue) 将动态值嵌入错误消息。返回的错误应使用 errors.New() 包含静态固定消息，动态上下文（ID、名称、状态码等）应通过前置的 log.Error 结构化字段记录。包装已有错误时应使用 errors.Wrap(err, \"static msg\")。静态错误消息便于监控系统按消息内容聚合告警。"
+    examples:
+      bad: "return errors.Errorf(\"unknown order type [%d]\", order.TypeCode)\nreturn errors.Errorf(\"resource %s is not in normal status\", resourceID)"
+      good: "log.Error(ctx, \"unknown order type\", log.Uint32(\"type_code\", order.TypeCode))\nreturn errors.New(\"unknown order type\")"
+
+  # 规则说明: omitempty 与 required 语义互斥，两者共存于同一字段是 bug
+  - id: QUAL-022
+    name: omitempty 与 required 标签不能同时存在于同一字段
+    severity: P1
+    pattern:
+      type: regex
+      match: ',omitempty"[^\n`]*(?:binding|validate):"[^"]*required'
+    message: "struct 字段同时存在 json:\",omitempty\" 和 binding:\"required\"（或 validate:\"required\"）是逻辑矛盾：omitempty 会在字段为零值时将其从 JSON 中省略，但 required 拒绝接受零值。应二选一：若字段必填则去掉 omitempty；若字段可选则使用指针类型并去掉 required。"
+    examples:
+      bad: 'ParamTemplateID int64 `json:"param_template_id,omitempty" validate:"required"`'
+      good: 'ParamTemplateID int64 `json:"param_template_id" validate:"required"`'
+
+  # 规则说明: 批量写操作方法应命名为 Batch*，*List 后缀语义表示读取列表，用于写操作会造成混淆
+  - id: QUAL-023
+    name: 批量写操作方法应使用 Batch 前缀命名
+    severity: P1
+    pattern:
+      type: regex
+      match: 'func \([^)]+\) (?:Create|Update|Delete)[A-Za-z]*List\b'
+    message: "批量创建/更新/删除记录的方法应命名为 BatchCreate*、BatchUpdate*、BatchDelete*，而非 Create*List、Update*List 等以 List 结尾的形式。*List 后缀在语义上表示读取列表，用于写操作会引起误解。例如：BatchCreateTag 而非 CreateTagList，BatchUpdatePrivilege 而非 UpdatePrivilegeList。"
+    examples:
+      bad: "func (l *TagLogic) CreateTagList(ctx context.Context, ...) error { ... }"
+      good: "func (l *TagLogic) BatchCreateTag(ctx context.Context, ...) error { ... }"
+
+  # 规则说明: Gin 路由路径缺少前导斜杠会导致 URL 拼接错误，请求无法正确路由
+  - id: QUAL-024
+    name: Gin 路由路径必须以 / 开头
+    severity: P1
+    pattern:
+      type: regex
+      match: '\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\("[^/\n]'
+    message: "Gin 路由注册时，路径参数必须以 / 开头。缺少前导斜杠会导致路由路径拼接时产生错误 URL（如 /api/v1describe_versions 而非 /api/v1/describe_versions），请求无法匹配，返回 404。注意：agent 需确认匹配的是路由注册调用（router.GET/POST 等），而非其他同名函数。"
+    examples:
+      bad: 'polarDBApi.POST("describe_db_versions", controller.DescribeDBVersions())'
+      good: 'polarDBApi.POST("/describe_db_versions", controller.DescribeDBVersions())'
+
+  # 规则说明: 普通 handler（非 middleware）中 return 前调用 c.Abort() 是多余代码
+  # NOTE: 误报率较高，agent 需确认是否为 middleware（middleware 需要保留 c.Abort()）
+  - id: QUAL-025
+    name: 普通 Handler 中 c.Abort() 在 return 前是冗余代码
+    severity: P2
+    pattern:
+      type: regex
+      match: 'c\.Abort\(\)'
+    message: "在普通 Gin handler（非 middleware）中，return 已终止 handler 执行，c.Abort() 无需额外调用——它仅在 middleware 中用于阻止后续 handler 链执行。在 handler 中 c.Abort() 后紧接 return 是冗余代码，应移除 c.Abort()。注意：误报率较高，agent 需确认：① 调用方是普通 handler 而非 middleware；② c.Abort() 后确实紧跟 return 而非其他逻辑。"
+    examples:
+      bad: "if err != nil {\n    _ = c.Error(errs.ServerError.New(err.Error()))\n    c.Abort()  // 冗余，return 已终止 handler\n    return\n}"
+      good: "if err != nil {\n    _ = c.Error(errs.ServerError.New(err.Error()))\n    return\n}"
+
+  # 规则说明: 函数体内编译固定正则会在高频调用时反复分配内存，应在包级别预编译
+  # NOTE: 误报率高，agent 需确认 pattern 是固定常量且调用点在函数体内（非包级别声明）
+  - id: QUAL-026
+    name: 固定正则表达式应在包级别预编译
+    severity: P1
+    pattern:
+      type: regex
+      match: 'regexp\.(MatchString|Compile|MustCompile)\('
+    message: "函数体内使用固定（常量）正则表达式时，应在包级别用 var xxxRe = regexp.MustCompile(`pattern`) 预编译，而非每次调用时动态编译。动态编译正则在高频路径上造成不必要的内存分配和 CPU 开销。注意：误报率高，agent 需确认：① 正则 pattern 是常量字符串（非动态拼接）；② 调用在函数体内而非包级别变量声明。"
+    examples:
+      bad: "func parseParamRange(s string) ParamType {\n    if matched, _ := regexp.MatchString(`^\\[?(ON|OFF)\\|`, s); matched {\n        return ParamTypeBool\n    }\n}"
+      good: "var boolRegex = regexp.MustCompile(`^\\[?(ON|OFF)\\|`)\n\nfunc parseParamRange(s string) ParamType {\n    if boolRegex.MatchString(s) {\n        return ParamTypeBool\n    }\n}"
+
+  # 规则说明: 变量名下划线前缀在 Go 中仅用于空白标识符，普通变量使用此前缀违反命名规范
+  - id: QUAL-027
+    name: 变量名禁止使用下划线前缀
+    severity: P1
+    pattern:
+      type: regex
+      match: '\b_[a-zA-Z][a-zA-Z0-9]* :='
+    message: "禁止在普通变量名前加下划线前缀（如 _subnetList、_regions）。Go 中 _ 仅用于空白标识符（丢弃值），非空白变量使用下划线前缀会误导读者，且不符合 Go 命名规范（golint/revive 会报告此问题）。应使用语义明确的名称（如 subnetListCopy、filteredRegions）。"
+    examples:
+      bad: "_subnetList := make(bo.SimpleSubnetList, len(subnetList))\ncopy(_subnetList, subnetList)"
+      good: "subnetListCopy := make(bo.SimpleSubnetList, len(subnetList))\ncopy(subnetListCopy, subnetList)"
+
+  # 规则说明: 云厂商相关常量名中混用大小写违反全大写约定，应统一为 SCOPE_CATEGORY_VALUE 全大写模式
+  # NOTE: 正则仅覆盖云厂商前缀的常量，agent 需综合检查所有常量命名是否遵循全大写模式
+  - id: QUAL-028
+    name: 常量名必须遵循全大写 SCOPE_CATEGORY_VALUE 命名模式
+    severity: P2
+    pattern:
+      type: regex
+      match: '^\s+(?:ALIYUN|AWS|TENCENT|AZURE|GCP|HUAWEI|CLOUD)[_A-Z0-9]+[a-z]'
+    message: "云厂商相关常量名必须使用全大写 SCOPE_CATEGORY_VALUE 模式，禁止混用大小写（如 AWS_RDS_CLOUD_WATCH_LOG_Audit 应改为 AWS_RDS_CLOUD_WATCH_LOG_AUDIT）。混用大小写的常量名在代码搜索和自动化工具中容易被忽略，也影响代码一致性。"
+    examples:
+      bad: "const (\n    ALIYUN_RDS_PAY_PRE            = \"Prepaid\"\n    AWS_RDS_CLOUD_WATCH_LOG_Audit = \"audit\"\n)"
+      good: "const (\n    ALIYUN_RDS_PAY_TYPE_PREPAID   = \"Prepaid\"\n    AWS_RDS_CLOUD_WATCH_LOG_AUDIT = \"audit\"\n)"

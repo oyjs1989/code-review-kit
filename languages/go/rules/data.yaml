@@ -174,3 +174,89 @@ rules:
     examples:
       bad: 'Status int `gorm:"column:status;not null" json:"status"` // 纯 DB 模型不需要 json tag'
       good: 'Status int `gorm:"column:status;not null"` // 纯 DB 模型只需 gorm tag'
+
+  # 规则说明: sql.NullXxx 类型在业务代码中需频繁解包，GORM 可用指针类型等效替代
+  - id: DATA-015
+    name: GORM 模型禁用 sql.NullXxx 类型，应使用指针类型
+    severity: P1
+    pattern:
+      type: regex
+      match: 'sql\.(NullTime|NullInt64|NullString|NullFloat64|NullBool|NullInt32|NullInt16|NullByte)\b'
+    message: "GORM 模型字段禁止使用 sql.NullXxx 类型（sql.NullTime、sql.NullInt64、sql.NullString 等）。应使用指针类型（*time.Time、*int64、*string）表示可空字段，指针 nil 即代表数据库 NULL。sql.NullXxx 在业务逻辑中需要频繁解包（先判断 .Valid，再取 .Time/.Int64 等），增加代码复杂度，且与 GORM 的指针惯例不一致。"
+    examples:
+      bad: "type DbAccount struct {\n    ExpireTime sql.NullTime  `gorm:\"column:expire_time\"`\n    SlaveConst sql.NullInt64 `gorm:\"column:slave_const\"`\n}"
+      good: "type DbAccount struct {\n    ExpireTime *time.Time `gorm:\"column:expire_time\"`\n    SlaveConst *int64     `gorm:\"column:slave_const\"`\n}"
+
+  # 规则说明: Find() 查无记录时返回空切片而非 ErrRecordNotFound，检查此错误是死代码
+  # NOTE: Take()/First()/Last() 之后检查 ErrRecordNotFound 是正确用法，agent 需区分上下文
+  - id: DATA-016
+    name: GORM Find() 后禁止检查 gorm.ErrRecordNotFound
+    severity: P1
+    pattern:
+      type: regex
+      match: 'gorm\.ErrRecordNotFound'
+    message: "gorm.ErrRecordNotFound 只由 Take()/First()/Last() 返回；Find() 在无匹配记录时返回空切片，不返回该错误。在 Find() 之后检查 ErrRecordNotFound 是永远不会触发的死代码，会误导读者。注意：Take()/First() 之后检查 ErrRecordNotFound 是正确用法，agent 需区分调用的是 Find 还是 Take/First。"
+    examples:
+      bad: "err = db.Model(&model.DbAccount{}).Where(\"resource_id = ?\", id).Find(&results).Error\nif errors.Is(err, gorm.ErrRecordNotFound) {\n    return nil, nil  // 永远不会执行\n}"
+      good: "err = db.Model(&model.DbAccount{}).Where(\"resource_id = ?\", id).Find(&results).Error\nif err != nil {\n    return nil, errors.Wrap(err, \"find db accounts failed\")\n}\n// results 为空切片时即表示无记录"
+
+  # 规则说明: 表有唯一约束时 GORM 自动检测冲突目标，显式 Columns 是冗余复制
+  - id: DATA-017
+    name: GORM OnConflict 在表有唯一键时应省略 Columns 字段
+    severity: P2
+    pattern:
+      type: regex
+      match: 'clause\.OnConflict\{[^}]*Columns:'
+    message: "当数据库表已有唯一约束时，GORM clause.OnConflict{} 无需显式声明 Columns 字段——GORM 会自动检测冲突目标。显式声明 Columns 是对数据库 unique key 定义的冗余复制，两者需同步维护，重构时容易不一致。只保留 DoUpdates 字段即可。"
+    examples:
+      bad: "db.Clauses(clause.OnConflict{\n    Columns:   []clause.Column{{Name: \"resource_id\"}, {Name: \"username\"}},\n    DoUpdates: clause.AssignmentColumns([]string{\"password\"}),\n}).Create(dbAccount)"
+      good: "db.Clauses(clause.OnConflict{\n    DoUpdates: clause.AssignmentColumns([]string{\"password\"}),\n}).Create(dbAccount)"
+
+  # 规则说明: 对来自 DB 或外部源的字符串执行 json.Unmarshal 前必须校验非空，否则返回解析错误
+  # NOTE: 直接使用字面量 JSON 字符串（如 []byte(`{"a":1}`)）无需校验，agent 需区分变量来源
+  - id: DATA-018
+    name: json.Unmarshal 前必须校验字符串非空
+    severity: P1
+    pattern:
+      type: regex
+      match: 'json\.Unmarshal\(\[\]byte\('
+    message: "json.Unmarshal([]byte(\"\"), &target) 会返回错误（unexpected end of JSON input）。对来自数据库字段或外部输入的字符串调用 json.Unmarshal 前，必须先用 len(s) > 0 校验非空。注意：agent 需判断 []byte() 中的字符串是否来自变量（可能为空）而非写死的 JSON 字面量。"
+    examples:
+      bad: "var tags map[string]string\nif err := json.Unmarshal([]byte(data.Tags), &tags); err != nil {\n    return nil, errors.Wrap(err, \"unmarshal tags failed\")\n}"
+      good: "var tags map[string]string\nif len(data.Tags) > 0 {\n    if err := json.Unmarshal([]byte(data.Tags), &tags); err != nil {\n        return nil, errors.Wrap(err, \"unmarshal tags failed\")\n    }\n}"
+
+  # 规则说明: db.Raw 绕过 GORM 查询构造器的参数化和 hook 机制，应优先使用构造器
+  - id: DATA-019
+    name: 优先使用 GORM 查询构造器，避免 db.Raw 原生 SQL
+    severity: P2
+    pattern:
+      type: regex
+      match: '\bdb\.Raw\('
+    message: "优先使用 GORM 查询构造器（db.Table().Select().Where().Find()）替代 db.Raw() 原生 SQL 字符串。查询构造器自动参数化防注入、尊重 GORM hooks 和软删除，且可读性更好。db.Raw 仅在构造器无法表达的复杂场景（如递归 CTE、特定数据库函数）下使用，并应添加注释说明原因。"
+    examples:
+      bad: 'err := db.Raw("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN (?)", systemDBs).Scan(&dbInfos).Error'
+      good: "err := db.WithContext(ctx).Table(\"information_schema.SCHEMATA\").\n    Select(\"SCHEMA_NAME\").\n    Where(\"SCHEMA_NAME NOT IN ?\", systemDBs).\n    Find(&dbInfos).Error"
+
+  # 规则说明: 统一使用 uk_ 前缀命名唯一索引，uniq_ 是非标准前缀
+  - id: DATA-020
+    name: GORM uniqueIndex 名称必须使用 uk_ 前缀
+    severity: P2
+    pattern:
+      type: regex
+      match: 'uniqueIndex:uniq_'
+    message: "GORM struct tag 中的 uniqueIndex 名称必须以 uk_ 为前缀（如 uk_resource_user_host），禁止使用 uniq_、unique_ 等非标准前缀。统一使用 uk_ 前缀是项目约定，便于 DBA 和开发者通过命名快速识别唯一索引。"
+    examples:
+      bad: 'ResourceID string `gorm:"uniqueIndex:uniq_resource_user_host;column:resource_id"`'
+      good: 'ResourceID string `gorm:"uniqueIndex:uk_resource_user_host;column:resource_id"`'
+
+  # 规则说明: Go 1.20+ 提供 time.DateTime 等标准常量，应避免硬编码时间格式字符串
+  - id: DATA-021
+    name: 使用 time.DateTime 标准常量替代硬编码时间格式字符串
+    severity: P2
+    pattern:
+      type: regex
+      match: '"2006-01-02 15:04:05"'
+    message: "Go 1.20+ 提供了 time.DateTime 常量（值为 \"2006-01-02 15:04:05\"），以及 time.DateOnly=\"2006-01-02\"、time.TimeOnly=\"15:04:05\"。应使用标准库常量替代硬编码的时间格式字符串，提高可读性并避免拼写错误。"
+    examples:
+      bad: 'result := t.Format("2006-01-02 15:04:05")'
+      good: "result := t.Format(time.DateTime)"

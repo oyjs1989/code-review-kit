@@ -170,3 +170,40 @@ rules:
     examples:
       bad: "for _, item := range items { go func(i Item) { process(i) }(item) } // 无并发控制，item 数量大时资源耗尽"
       good: "l := limiter.NewConcurrentLimiter(10); for _, item := range items { item := item; l.Execute(func() { process(item) }) }"
+
+  # 规则说明: time.NewTicker 分配底层定时器资源，不 Stop 会导致 goroutine 和 channel 泄漏
+  - id: SAFE-015
+    name: time.NewTicker 必须配合 defer Stop() 使用
+    severity: P1
+    pattern:
+      type: regex
+      match: 'time\.NewTicker\('
+    message: "调用 time.NewTicker() 后必须紧跟 defer ticker.Stop()，防止 goroutine 和 channel 泄漏。NewTicker 分配底层定时器资源，函数退出时不 Stop 会导致后台 goroutine 持续运行、内存无法释放。正确模式：ticker := time.NewTicker(interval); defer ticker.Stop()。注意：agent 需确认 NewTicker 调用后是否有 defer ticker.Stop()。"
+    examples:
+      bad: "checkTicker := time.NewTicker(30 * time.Second)\nfor {\n    select {\n    case <-checkTicker.C:\n        // ...\n    }\n}"
+      good: "checkTicker := time.NewTicker(30 * time.Second)\ndefer checkTicker.Stop()\nfor {\n    select {\n    case <-checkTicker.C:\n        // ...\n    }\n}"
+
+  # 规则说明: var err error 预声明扩大 err 变量作用域，应在第一次使用点用 := 声明
+  # NOTE: 误报率中等，agent 需判断是否存在无法用 := 的赋值点（如 if 内赋值后需要在 if 外使用）
+  - id: SAFE-016
+    name: 禁止在函数顶部预声明 var err error
+    severity: P1
+    pattern:
+      type: regex
+      match: '^\s+var err error\s*$'
+    message: "禁止在函数顶部使用 var err error 预声明错误变量。应在每次首次使用点用 := 声明，缩小变量作用域，防止意外复用或覆盖前次错误返回值。预声明 var err error 还会导致后续赋值全部用 =，无法借助 := 强制确认新变量。注意：误报率中等，agent 需判断是否存在无法用 := 初始化的赋值点。"
+    examples:
+      bad: "func GetUser(id int64) (*User, error) {\n    var err error\n    // 多行后\n    data, err = doSomething()\n    err = json.Unmarshal(data, &resp)\n}"
+      good: "func GetUser(id int64) (*User, error) {\n    data, err := doSomething()\n    if err != nil { return nil, err }\n    if err = json.Unmarshal(data, &resp); err != nil { return nil, err }\n}"
+
+  # 规则说明: 存储加密结果的变量名必须明确标识为密文，防止明文/密文混用导致安全漏洞
+  - id: SAFE-017
+    name: 加密结果变量名必须包含 encrypted/Encrypted 标识
+    severity: P1
+    pattern:
+      type: regex
+      match: ':=\s*\S+\.Encrypt\('
+    message: "存储 Encrypt() 调用返回值的变量名必须包含 encrypted/Encrypted 标识词（如 encryptedPassword），以区分明文和密文。混淆命名（如直接用 password）容易导致：① 将密文误传给不应接收密文的 API；② 将明文存入应存密文的字段。注意：agent 需检查赋值左侧变量名是否含有 encrypted 或 Encrypted 关键字。"
+    examples:
+      bad: "password, err := l.cryptor.Encrypt(req.GetAccountPassword())\ndetail.AccountPassword = password // 不清楚是否为密文"
+      good: "encryptedPassword, err := l.cryptor.Encrypt(req.GetAccountPassword())\ndetail.AccountPassword = encryptedPassword"

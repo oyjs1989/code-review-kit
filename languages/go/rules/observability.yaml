@@ -138,3 +138,40 @@ rules:
     examples:
       bad: 'log.Error(ctx, "create user failed", log.ErrorField(err), log.String("name", name))'
       good: 'log.Error(ctx, "create user failed", log.String("name", name), log.ErrorField(err))'
+
+  # 规则说明: 在日志调用中使用 fmt.Sprintf 嵌入动态值违反结构化日志原则
+  - id: OBS-012
+    name: 禁止在日志消息中使用 fmt.Sprintf 格式化动态值
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.(Info|Error|Warn|Debug)\(.*fmt\.Sprintf'
+    message: "禁止在日志调用中使用 fmt.Sprintf 将动态值嵌入消息字符串。应保持消息字符串为固定文本，动态值通过结构化字段参数（log.String、log.Int64、log.Any 等）传递。固定消息字符串便于日志平台按消息内容聚合和配置告警规则；fmt.Sprintf 消息每次不同，无法聚合。"
+    examples:
+      bad: "log.Info(ctx, fmt.Sprintf(\"apply order created, role_id:%d\", role.ID))\nlog.Info(ctx, fmt.Sprintf(\"delete success: %v\", request.IdList))"
+      good: "log.Info(ctx, \"apply order created\", log.Int64(\"role_id\", role.ID))\nlog.Info(ctx, \"delete success\", log.Any(\"id_list\", request.IdList))"
+
+  # 规则说明: 业务逻辑层日志消息必须使用英文，便于日志平台建索引和多语言团队排查问题
+  # NOTE: 依赖 PCRE Unicode 字符类 \p{Han}，需 grep -P 支持。误报率较高，agent 需确认是否在 biz/service 层
+  - id: OBS-013
+    name: 业务逻辑层日志消息必须使用英文
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.(Info|Error|Warn|Debug)\(ctx,\s*"[^"]*\p{Han}'
+    message: "业务逻辑层（biz/service 层）的日志消息字符串必须使用英文。中文日志消息无法被 ELK/Loki 等日志聚合平台按消息内容正确索引，也无法供非中文团队成员排查问题。中文仅允许出现在面向用户的错误描述或代码注释中。注意：误报率较高（controller 展示层偶尔允许中文），agent 需确认调用是否在 biz/service 目录的代码中。"
+    examples:
+      bad: 'log.Info(ctx, "开始更新组织架构策略文件", log.String("policy_name", policyName))'
+      good: 'log.Info(ctx, "start updating dept policy file", log.String("policy_name", policyName))'
+
+  # 规则说明: 格式化日志函数（Errorf/Warnf）不接受结构化 log.Field 参数，字段会被静默丢弃
+  - id: OBS-014
+    name: 格式化日志函数（Errorf/Warnf/Infof）禁止混用结构化 log.Field 参数
+    severity: P1
+    pattern:
+      type: regex
+      match: 'log\.(Errorf|Warnf|Infof|Debugf)\(.*log\.(String|Int|Int64|Bool|Float64|Any|ErrorField)\('
+    message: "禁止在格式化日志函数（log.Errorf、log.Warnf、log.Infof 等）中传入结构化字段参数（log.String、log.ErrorField 等）。格式化函数只接受 printf 风格参数，结构化 log.Field 参数会被静默丢弃，导致关键信息在日志中丢失。应改用对应的非格式化函数：log.Error、log.Warn、log.Info，配合结构化字段。"
+    examples:
+      bad: "log.Errorf(ctx, \"get region list failed\", log.ErrorField(err))\nlog.Warnf(ctx, \"region not found\", log.String(\"region_name\", regionName))"
+      good: "log.Error(ctx, \"get region list failed\", log.ErrorField(err))\nlog.Warn(ctx, \"region not found\", log.String(\"region_name\", regionName))"
