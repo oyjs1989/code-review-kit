@@ -47,3 +47,7 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+
+
+spec-kit/
+gsd-2/
