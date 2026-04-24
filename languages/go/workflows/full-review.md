@@ -4,7 +4,7 @@
 >
 > **关键约束**：
 > - `SESSION_DIR` 和 `$$` PID 在此文件中定义，不在路由器中
-> - `ASSEMBLE_EXIT=2` 的 LITE 降级逻辑在此文件的 Step 3 中处理
+> - `ASSEMBLE_EXIT=2` 触发 `FORCE_LOOP=true`（保持 FULL 档，分批处理），逻辑在 Step 3 中
 > - `AGENT_ROSTER` 从 `classification.json` 读取，不硬编码
 > - 输出格式见 `templates/report.md`；Context Package 格式见 `templates/context-package.md`
 
@@ -146,7 +146,7 @@ fi
 - `$SESSION_DIR/context-package.md` — Context Package（格式见 `templates/context-package.md`）
 - `$SESSION_DIR/context-meta.json` — 组装元数据（来自 stderr）
 
-**Exit:** 0=成功；2=`[Change Set]` 被截断 → `TIER` 降级为 LITE
+**Exit:** 0=成功；2=`[Change Set]` 被截断 → 设置 `FORCE_LOOP=true`，保持 FULL 档改用分批处理
 
 ```bash
 echo "[3/6] 组装上下文..."
@@ -162,9 +162,10 @@ python3 languages/go/tools/assemble-context.py \
 ASSEMBLE_EXIT=$?
 
 # 检测 change_set 截断警告（exit code 2）
+FORCE_LOOP=false
 if [ "$ASSEMBLE_EXIT" -eq 2 ]; then
-  echo "WARNING: [Change Set] 被截断，降档为 Lite 处理"
-  TIER="LITE"
+  echo "WARNING: [Change Set] 超出 token 上限，强制启用 Loop 模式（分批处理，保持 Full 档）"
+  FORCE_LOOP=true
 fi
 
 echo "✓ Context Package 组装完成"
@@ -257,9 +258,13 @@ echo "  ✓ Tier 2 规则扫描完成"
 ### Loop 模式判断
 
 ```bash
-if [ "$TIER" = "FULL" ] && [ "$DIFF_LINES" -ge 400 ]; then
+if { [ "$TIER" = "FULL" ] && [ "$DIFF_LINES" -ge 400 ]; } || [ "$FORCE_LOOP" = "true" ]; then
   LOOP_MODE=true
-  echo "  → Loop 模式（diff_lines=$DIFF_LINES >= 400）"
+  if [ "$FORCE_LOOP" = "true" ]; then
+    echo "  → Loop 模式（Change Set 超出 token 上限，强制分批）"
+  else
+    echo "  → Loop 模式（diff_lines=$DIFF_LINES >= 400）"
+  fi
 else
   LOOP_MODE=false
 fi
@@ -335,26 +340,42 @@ echo "  → 共 $(python3 -c "import json; d=json.load(open('$SESSION_DIR/task-p
 **Loop 执行**（对每个 `pending_tasks` 中的 task_id）：
 
 1. 更新 `workflow-state.json`：移至 `in_progress`
-2. 读取任务包的 `files` 列表，生成该批文件的 sub-diff
-3. 调用对应 Agent（`task_id` 格式 `task-{pack}:{agent}`）
-4. Agent 输出追加到 `$SESSION_DIR/findings-{agent}.md`
-5. 更新 `workflow-state.json`：移至 `completed`（失败则移至 `skipped`，最多重试 2 次）
+2. 读取任务包的 `files` 列表，从 `diff.txt` 提取该批文件的 sub-diff：
+   ```bash
+   PACK_FILES=$(python3 -c "
+   import json
+   packs = json.load(open('$SESSION_DIR/task-packs.json'))
+   t = next(t for t in packs['tasks'] if t['task_id'] == '$TASK_ID')
+   print(' '.join(t['files']))
+   ")
+   python3 -c "
+   files = set('$PACK_FILES'.split())
+   out, capture = [], False
+   for line in open('$SESSION_DIR/diff.txt'):
+       if line.startswith('diff --git'):
+           capture = any(f in line for f in files)
+       if capture:
+           out.append(line)
+   open('$SESSION_DIR/sub-diff-$PACK_INDEX.txt', 'w').writelines(out)
+   "
+   ```
+3. 用 sub-diff 为该批次组装独立的 Context Package（不使用全局截断版本）：
+   ```bash
+   python3 languages/go/tools/assemble-context.py \
+     --diff "$SESSION_DIR/sub-diff-$PACK_INDEX.txt" \
+     --rules-source "$RULES_SOURCE" \
+     ${RULES_FILE:+--rules-file "$RULES_FILE"} \
+     --git-log "$SESSION_DIR/gitlog.txt" \
+     > "$SESSION_DIR/context-pack-$PACK_INDEX.md" \
+     2>/dev/null || true
+   ```
+4. 调用对应 Agent（`task_id` 格式 `task-{pack}:{agent}`），传入 `context-pack-$PACK_INDEX.md`
+5. Agent 输出追加到 `$SESSION_DIR/findings-{agent}.md`
+6. 更新 `workflow-state.json`：移至 `completed`（失败则移至 `skipped`，最多重试 2 次）
 
-### Verifier（仅 Full 档，所有 Agent 完成后）
+### Verifier（已工具化）
 
-```bash
-cat "$SESSION_DIR"/findings-*.md > "$SESSION_DIR/all-findings.md"
-
-P0P1_COUNT=$(grep -c '\[P0\]\|\[P1\]' "$SESSION_DIR/all-findings.md" 2>/dev/null || echo 0)
-if [ "$P0P1_COUNT" -gt 0 ]; then
-  echo "  → 派发 Verifier（P0/P1 共 $P0P1_COUNT 条）..."
-  # 读取 verifier.md + context-package.md + all-findings.md 中 P0/P1 条目
-  # Agent(agents/verifier.md, prompt=<合并内容>)
-  # Verifier 输出写入 $SESSION_DIR/verifier-results.md
-  # 根据 confirm/downgrade/dismiss 更新 all-findings.md
-  echo "  ✓ Verifier 完成"
-fi
-```
+> Verifier 逻辑已合并至 `aggregate-findings.py --rule-hits-file`，无需单独 AI agent 调用。
 
 ---
 
@@ -393,6 +414,9 @@ python3 languages/go/tools/aggregate-findings.py \
   --findings-dir "$SESSION_DIR" \
   ${RULES_FILE:+--redlines-file "$RULES_FILE"} \
   ${IGNORE_FLAGS:+--review-ignore-flags "$IGNORE_FLAGS"} \
+  --rule-hits-file "$SESSION_DIR/rule-hits.json" \
+  --classification-file "$SESSION_DIR/classification.json" \
+  --context-meta-file "$SESSION_DIR/context-meta.json" \
   --max-output 15 \
   --output "$REPORT_FILE"
 ```
@@ -404,29 +428,7 @@ FINDING_COUNT=$(grep -c '^### \[P' "$REPORT_FILE" 2>/dev/null || echo 0)
 echo "✓ 过滤后 $FINDING_COUNT 条（覆盖 $FILES_CHANGED 个文件）"
 ```
 
-### Coordinator Agent（生成 Review Assumptions）
-
-```bash
-CONTEXT_PACKAGE=$(cat "$SESSION_DIR/context-package.md")
-FILTERED_FINDINGS=$(cat "$REPORT_FILE")
-COVERAGE_SUMMARY="files_reviewed: $FILES_CHANGED / $FILES_CHANGED
-skipped: 无
-rules_source: $RULES_SOURCE${RULES_FILE:+（$RULES_FILE）}
-tier: $TIER"
-
-# Agent(agents/coordinator.md, prompt=<三部分内容>):
-# 1. [Context Package]   → $CONTEXT_PACKAGE
-# 2. [Filtered Findings] → $FILTERED_FINDINGS
-# 3. [Coverage Summary]  → $COVERAGE_SUMMARY
-# Coordinator 输出写入 $SESSION_DIR/final-report.md
-
-if [ -f "$SESSION_DIR/final-report.md" ]; then
-  cp "$SESSION_DIR/final-report.md" "$REPORT_FILE"
-  echo "  ✓ Coordinator 生成 Review Assumptions 完成"
-else
-  echo "  ⚠ Coordinator 未输出，使用聚合报告"
-fi
-```
+> Coordinator 已工具化：审查说明由 `aggregate-findings.py --classification-file --context-meta-file` 自动生成。
 
 ---
 

@@ -204,6 +204,9 @@ python3 languages/go/tools/aggregate-findings.py \
   --findings-dir "$SESSION_DIR" \
   ${RULES_FILE:+--redlines-file "$RULES_FILE"} \
   ${IGNORE_FLAGS:+--review-ignore-flags "$IGNORE_FLAGS"} \
+  --rule-hits-file "$SESSION_DIR/rule-hits.json" \
+  --classification-file "$SESSION_DIR/classification.json" \
+  --context-meta-file "$SESSION_DIR/context-meta.json" \
   --max-output 15 \
   --output "$REPORT_FILE"
 
