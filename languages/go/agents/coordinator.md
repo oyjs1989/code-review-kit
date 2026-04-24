@@ -1,5 +1,8 @@
 ---
 name: coordinator
+output_file: final-report.md
+required_sections:
+  - "## Review Assumptions"
 description: |
   Review Coordinator: generates Review Assumptions section describing review coverage,
   skipped files, loaded rules version, and architectural assumptions. Use after aggregate-findings.py

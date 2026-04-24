@@ -1,5 +1,10 @@
 ---
 name: verifier
+output_file: verifier-results.md
+required_sections:
+  - "confirm"
+  - "downgrade"
+  - "dismiss"
 description: |
   Adversarial verifier for Go code review P0/P1 findings. Attempts to dismiss false positives
   by finding evidence that contradicts each finding. Use after all expert agents complete (Full tier only).
