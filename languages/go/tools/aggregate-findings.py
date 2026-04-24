@@ -67,6 +67,8 @@ ADJACENT_LINE_THRESHOLD = 3
 MIN_CONFIDENCE = 0.75
 FUZZY_THRESHOLD = 0.85
 MAX_FUZZY_PER_CATEGORY = 3
+VERIFY_CONFIDENCE_CEILING = 0.92   # findings above this are treated as already confirmed
+VERIFY_DOWNGRADE_AMOUNT = 0.10     # confidence penalty for SAFE/DATA findings with no Tier2 hit
 
 
 # ── Finding data structure ──────────────────────────────────────────────────────
@@ -403,8 +405,6 @@ def auto_verify(findings: list, rule_hits: dict) -> None:
     Only affects P0/P1 findings with confidence < 0.92.
     Mutates findings in-place.
     """
-    CONFIDENCE_CEILING = 0.92
-    DOWNGRADE_AMOUNT = 0.10
     SAFE_DATA_PREFIXES = ('SAFE-', 'DATA-')
 
     # Build lookup: {(rule_id, filepath): [line_numbers]}
@@ -416,7 +416,7 @@ def auto_verify(findings: list, rule_hits: dict) -> None:
     for f in findings:
         if f.severity not in ('P0', 'P1'):
             continue
-        if f.confidence >= CONFIDENCE_CEILING:
+        if f.confidence >= VERIFY_CONFIDENCE_CEILING:
             continue
 
         key = (f.rule_id, f.filepath)
@@ -426,7 +426,7 @@ def auto_verify(findings: list, rule_hits: dict) -> None:
             if any(abs(f.line_start - ln) <= ADJACENT_LINE_THRESHOLD for ln in matched_lines):
                 f.confidence = 1.0
         elif any(f.rule_id.startswith(p) for p in SAFE_DATA_PREFIXES):
-            f.confidence = max(0.0, f.confidence - DOWNGRADE_AMOUNT)
+            f.confidence = max(0.0, f.confidence - VERIFY_DOWNGRADE_AMOUNT)
 
 
 # ── golangci-lint JSON conversion ───────────────────────────────────────────────
@@ -622,7 +622,7 @@ def aggregate(
         redline_ids = load_redline_rule_ids(redlines_file)
         apply_redlines(findings, redline_ids)
 
-    # Step 2.5: Auto-verify (replaces Verifier agent)
+    # Step 3.5: Auto-verify (replaces Verifier agent)
     if rule_hits_file and Path(rule_hits_file).exists():
         try:
             rule_hits = json.loads(Path(rule_hits_file).read_text())
