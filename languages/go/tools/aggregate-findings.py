@@ -451,6 +451,28 @@ def write_findings_md(findings: list, output_file: str) -> None:
 
 # ── Report generation ───────────────────────────────────────────────────────────
 
+def build_review_assumptions(classification: dict, context_meta: dict) -> str:
+    """Generate deterministic review assumptions section from metadata."""
+    tier = classification.get('tier', 'UNKNOWN')
+    trigger = classification.get('trigger_reason', '')
+    rules_source = classification.get('rules_source', 'built_in')
+    agents = classification.get('agent_roster', [])
+    estimated = context_meta.get('estimated_tokens', 0)
+    limit = context_meta.get('token_limit', 16000)
+    truncated = context_meta.get('truncated_sections', [])
+
+    lines = [
+        '## 审查说明\n',
+        f'- **处理档位**: {tier}（{trigger}）',
+        f'- **规则来源**: {rules_source}',
+        f'- **运行 Agents**: {", ".join(agents) if agents else "（无）"}',
+        f'- **Token 估算**: {estimated} / {limit}',
+        f'- 截断节：{", ".join(truncated) if truncated else "无"}',
+        '',
+    ]
+    return '\n'.join(lines)
+
+
 def generate_report(
     findings: list,
     total_raw: int,
@@ -458,6 +480,8 @@ def generate_report(
     total_filtered: int,
     max_output: int,
     output_file: str,
+    classification: dict | None = None,
+    context_meta: dict | None = None,
 ) -> None:
     """Generate final Markdown review report with optional Appendix."""
     displayed = findings[:max_output]
@@ -468,6 +492,10 @@ def generate_report(
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
     lines = ['# Go 代码审查报告\n']
+
+    # Review assumptions (replaces Coordinator agent)
+    if classification and context_meta:
+        lines.append(build_review_assumptions(classification, context_meta))
 
     # Summary table
     lines.append('## 审查摘要\n')
@@ -528,6 +556,8 @@ def aggregate(
     review_ignore_flags: str,
     max_output: int,
     output_file: str,
+    classification_file: str | None = None,
+    context_meta_file: str | None = None,
 ) -> None:
     """Full aggregation pipeline."""
     findings_dir_path = Path(findings_dir)
@@ -574,7 +604,24 @@ def aggregate(
     findings.sort(key=lambda f: f.sort_key)
 
     # Step 8: Generate report (truncates to max_output, rest → Appendix)
-    generate_report(findings, total_raw, total_after_dedup, total_filtered, max_output, output_file)
+    classification = None
+    context_meta = None
+    if classification_file and Path(classification_file).exists():
+        try:
+            classification = json.loads(Path(classification_file).read_text())
+        except json.JSONDecodeError:
+            pass
+    if context_meta_file and Path(context_meta_file).exists():
+        try:
+            context_meta = json.loads(Path(context_meta_file).read_text())
+        except json.JSONDecodeError:
+            pass
+    generate_report(
+        findings, total_raw, total_after_dedup, total_filtered,
+        max_output, output_file,
+        classification=classification,
+        context_meta=context_meta,
+    )
 
     # Terminal summary
     displayed = findings[:max_output]
@@ -610,6 +657,10 @@ def main():
     # Lint JSON conversion mode
     parser.add_argument('--lint-json', default='',
                         help='golangci-lint JSON output to convert (conversion mode)')
+    parser.add_argument('--classification-file', default='',
+                        help='Path to classification.json (enables review assumptions section)')
+    parser.add_argument('--context-meta-file', default='',
+                        help='Path to context-meta.json (enables review assumptions section)')
 
     args = parser.parse_args()
 
@@ -631,6 +682,8 @@ def main():
         review_ignore_flags=args.review_ignore_flags,
         max_output=args.max_output,
         output_file=args.output,
+        classification_file=args.classification_file or None,
+        context_meta_file=args.context_meta_file or None,
     )
 
 
