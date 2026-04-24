@@ -2050,7 +2050,8 @@ def install(
 
     if ai == "claude":
         skills_dir = target_path / ".claude" / "skills"
-        skill_name = "codereview-go"
+        # Directory name = "codereview" so Claude Code maps /codereview <args> → this skill
+        skill_name = "codereview"
         skill_dest = skills_dir / skill_name / "SKILL.md"
         skill_src = review_languages_dest / "go" / "SKILL.md"
 
@@ -2066,6 +2067,10 @@ def install(
         content = content.replace('"languages/go/', '".review/languages/go/')
         content = content.replace("'languages/go/", "'.review/languages/go/")
         content = content.replace(" languages/go/", " .review/languages/go/")
+
+        # Rewrite frontmatter name to "codereview" so /codereview go routes here
+        import re as _re
+        content = _re.sub(r"^name:.*$", "name: codereview", content, count=1, flags=_re.MULTILINE)
 
         skill_dest.write_text(content)
         installed.append(skill_name)
@@ -2102,9 +2107,9 @@ def install(
     console.print(Panel(
         f"Installed: {', '.join(installed)}\n\n"
         f"Usage in {ai.title()} Code:\n"
-        f"  /codereview go              # Review current branch vs main\n"
-        f"  /codereview go --base dev   # Review vs develop branch\n"
-        f"  /codereview go --resume     # Resume interrupted review",
+        f"  /codereview go                       # Review current branch vs main\n"
+        f"  /codereview go --base develop        # Review vs develop branch\n"
+        f"  /codereview go --resume              # Resume interrupted review",
         title="[green]Installation Complete[/green]",
         border_style="green",
     ))
