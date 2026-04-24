@@ -36,12 +36,11 @@ app = typer.Typer(
 
 console = Console()
 
-BANNER = r"""
-  ____          _     ____                  _ _    _ _   
- / ___|___   __| | __| ___|_ __   ___ _ __ | | | _(_) |_ 
-| |   / _ \ / _` |/ _`_  / '_ \ / _ \ '_ \| | |/ / | __|
-| |__| (_) | (_| | (_| / /| |_) |  __/ | | | |   <| | |_ 
- \____\___/ \__,_|\__,___|_.__/ \___|_| |_|_|_|\_\_|\__|
+BANNER = """
+┌─────────────────────────────────────┐
+│         Code Review Kit             │
+│  Structured code review workflow    │
+└─────────────────────────────────────┘
 """
 
 TAGLINE = "Code Review Kit - Structured code review workflow"
@@ -374,6 +373,80 @@ def _auto_fix_style_issues(target_path: Path, language: str):
             timeout=120
         )
         console.print("[green]✓ Code formatted[/green]")
+
+
+@app.command()
+def go(
+    target: str = typer.Argument(".", help="Target directory to review"),
+    auto_install: bool = typer.Option(True, "--install/--no-install", help="Auto-install missing tools"),
+):
+    """Run Go code review: static scan + severity-graded report."""
+    from datetime import datetime
+
+    show_banner()
+
+    target_path = Path(target).resolve()
+    console.print(f"[cyan]Target:[/cyan] {target_path}")
+    console.print()
+
+    # Run Go scanners
+    console.print("[bold]Running Go scanners...[/bold]")
+    output_path = Path(".review/scanner-results")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    all_issues = _run_go_scanners(target_path, output_path, "all", auto_install)
+    console.print()
+
+    # Classify by severity (Go-specific: no Python rule names involved)
+    p0_issues = [i for i in all_issues if i.get("severity") in ("error", "p0") or i.get("tool") == "gosec"]
+    p1_issues = [i for i in all_issues if i not in p0_issues and i.get("severity") == "warning"]
+    other_issues = [i for i in all_issues if i not in p0_issues and i not in p1_issues]
+
+    # Summary table
+    summary_table = Table(title="Go Review Summary", show_header=True)
+    summary_table.add_column("Priority", style="cyan")
+    summary_table.add_column("Count", justify="right")
+    summary_table.add_column("Description")
+    summary_table.add_row("P0 (Must Fix)", str(len(p0_issues)), "Build errors / security")
+    summary_table.add_row("P1 (Should Fix)", str(len(p1_issues)), "Static analysis warnings")
+    summary_table.add_row("Other", str(len(other_issues)), "Tool errors / uncategorized")
+    summary_table.add_row("[bold]Total[/bold]", f"[bold]{len(all_issues)}[/bold]", "")
+    console.print(summary_table)
+
+    # Show issues
+    for label, issues, color in [("P0", p0_issues, "red"), ("P1", p1_issues, "yellow"), ("Other", other_issues, "dim")]:
+        if not issues:
+            continue
+        console.print(f"\n[bold {color}]{label} Issues:[/bold {color}]")
+        issue_table = Table(show_header=True, header_style="bold")
+        issue_table.add_column("Tool", style="cyan", width=12)
+        issue_table.add_column("File")
+        issue_table.add_column("Line", justify="right", width=6)
+        issue_table.add_column("Rule", width=16)
+        issue_table.add_column("Message")
+        for issue in issues:
+            issue_table.add_row(
+                issue.get("tool", ""),
+                issue.get("file", ""),
+                str(issue.get("line", "")),
+                issue.get("rule", ""),
+                issue.get("message", ""),
+            )
+        console.print(issue_table)
+
+    # Save results
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    result_file = output_path / f"go-{timestamp}.json"
+    result_file.write_text(json.dumps({
+        "timestamp": timestamp,
+        "target": str(target_path),
+        "language": "go",
+        "summary": {"total": len(all_issues), "p0": len(p0_issues), "p1": len(p1_issues), "other": len(other_issues)},
+        "p0_issues": p0_issues,
+        "p1_issues": p1_issues,
+        "other_issues": other_issues,
+    }, indent=2))
+    console.print(f"\n[dim]Results saved to: {result_file}[/dim]")
 
 
 @app.command()
@@ -1924,6 +1997,108 @@ def _send_reply(platform: str, repo: str, pr_number: int, reply_data: dict, toke
         return False
     
     return False
+
+
+@app.command()
+def install(
+    ai: str = typer.Option("claude", "--ai", "-a", help="AI agent to install for (claude, gemini, copilot)"),
+    target: str = typer.Argument(".", help="Target project directory (default: current directory)"),
+):
+    """Install code-review-kit skills into your AI agent's command directory.
+
+    Copies language tools to .review/languages/ and registers slash commands
+    so you can run /codereview go inside your AI agent.
+    """
+    import shutil
+
+    show_banner()
+
+    target_path = Path(target).resolve()
+    console.print(f"[cyan]Target project:[/cyan] {target_path}")
+    console.print(f"[cyan]AI agent:[/cyan] {ai}")
+    console.print()
+
+    # Locate the source languages/ directory (relative to this file)
+    # __file__ = .../src/review_cli/__init__.py
+    # languages/ = .../languages/
+    package_root = Path(__file__).parent.parent.parent
+    languages_src = package_root / "languages"
+
+    if not languages_src.exists():
+        console.print(f"[red]Error: languages/ directory not found at {languages_src}[/red]")
+        console.print("[yellow]Make sure code-review-kit is installed from source (not a wheel without data files).[/yellow]")
+        raise typer.Exit(1)
+
+    # Step 1: Copy language tools to .review/languages/ in target project
+    review_languages_dest = target_path / ".review" / "languages"
+    if review_languages_dest.exists():
+        shutil.rmtree(review_languages_dest)
+    shutil.copytree(languages_src, review_languages_dest)
+    console.print(f"[green]✓[/green] Copied language tools → {review_languages_dest.relative_to(target_path)}")
+
+    # Step 2: Generate and install skill for each supported language
+    installed = []
+
+    if ai == "claude":
+        skills_dir = target_path / ".claude" / "skills"
+        skill_name = "codereview-go"
+        skill_dest = skills_dir / skill_name / "SKILL.md"
+        skill_src = review_languages_dest / "go" / "SKILL.md"
+
+        if not skill_src.exists():
+            console.print(f"[red]Error: Go skill not found at {skill_src}[/red]")
+            raise typer.Exit(1)
+
+        skill_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # Rewrite paths: languages/go/ → .review/languages/go/
+        content = skill_src.read_text()
+        content = content.replace("`languages/go/", "`.review/languages/go/")
+        content = content.replace('"languages/go/', '".review/languages/go/')
+        content = content.replace("'languages/go/", "'.review/languages/go/")
+        content = content.replace(" languages/go/", " .review/languages/go/")
+
+        skill_dest.write_text(content)
+        installed.append(skill_name)
+        console.print(f"[green]✓[/green] Installed skill → {skill_dest.relative_to(target_path)}")
+
+    elif ai == "gemini":
+        commands_dir = target_path / ".gemini" / "commands"
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        skill_src = review_languages_dest / "go" / "SKILL.md"
+        dest = commands_dir / "codereview-go.md"
+        content = skill_src.read_text()
+        content = content.replace("languages/go/", ".review/languages/go/")
+        dest.write_text(content)
+        installed.append("codereview-go")
+        console.print(f"[green]✓[/green] Installed command → {dest.relative_to(target_path)}")
+
+    elif ai == "copilot":
+        commands_dir = target_path / ".github" / "agents"
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        skill_src = review_languages_dest / "go" / "SKILL.md"
+        dest = commands_dir / "codereview-go.md"
+        content = skill_src.read_text()
+        content = content.replace("languages/go/", ".review/languages/go/")
+        dest.write_text(content)
+        installed.append("codereview-go")
+        console.print(f"[green]✓[/green] Installed agent → {dest.relative_to(target_path)}")
+
+    else:
+        console.print(f"[red]Unsupported AI agent: {ai}[/red]")
+        console.print("[yellow]Supported: claude, gemini, copilot[/yellow]")
+        raise typer.Exit(1)
+
+    console.print()
+    console.print(Panel(
+        f"Installed: {', '.join(installed)}\n\n"
+        f"Usage in {ai.title()} Code:\n"
+        f"  /codereview go              # Review current branch vs main\n"
+        f"  /codereview go --base dev   # Review vs develop branch\n"
+        f"  /codereview go --resume     # Resume interrupted review",
+        title="[green]Installation Complete[/green]",
+        border_style="green",
+    ))
 
 
 def main():
