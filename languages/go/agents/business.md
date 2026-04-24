@@ -1,5 +1,8 @@
 ---
 name: business
+output_file: findings-business.md
+required_sections:
+  - "### [P"
 description: |
   Go business logic and requirements expert. Use when reviewing code changes to infer business intent, validate business rules, identify logic gaps, edge case omissions, and semantic correctness.
   <example>

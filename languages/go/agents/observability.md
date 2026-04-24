@@ -1,5 +1,8 @@
 ---
 name: observability
+output_file: findings-observability.md
+required_sections:
+  - "### [P"
 description: |
   Go observability expert. Use when reviewing logging strategy, structured logging usage, error message quality, monitoring instrumentation, and debuggability.
   <example>

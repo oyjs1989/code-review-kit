@@ -1,5 +1,8 @@
 ---
 name: design
+output_file: findings-design.md
+required_sections:
+  - "### [P"
 description: |
   Go architecture and design philosophy expert. Use when reviewing overall code design, function responsibilities, abstraction quality, design patterns, UNIX philosophy compliance, and code structure health.
   <example>

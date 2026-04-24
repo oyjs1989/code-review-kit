@@ -1,5 +1,8 @@
 ---
 name: safety
+output_file: findings-safety.md
+required_sections:
+  - "### [P"
 description: |
   Go code safety and correctness expert. Use when reviewing concurrent operations, goroutine patterns, context propagation, defensive programming, error handling completeness, and nil safety.
   <example>

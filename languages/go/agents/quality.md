@@ -1,5 +1,8 @@
 ---
 name: quality
+output_file: findings-quality.md
+required_sections:
+  - "### [P"
 description: |
   Go code quality expert. Use when reviewing code metrics, naming conventions, readability, maintainability, and overall code health. Synthesizes diagnostics.json and rule-hits.json for quantitative assessment.
   <example>

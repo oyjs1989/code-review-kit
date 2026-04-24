@@ -1,5 +1,8 @@
 ---
 name: data
+output_file: findings-data.md
+required_sections:
+  - "### [P"
 description: |
   Go data layer expert. Use when reviewing GORM operations, database queries, serialization patterns, type semantics, N+1 query detection, and data model design.
   <example>
