@@ -44,14 +44,11 @@ PREPARE_EXIT=$?
 [ "$PREPARE_EXIT" -eq 2 ] && exit 0   # TRIVIAL — no review needed
 [ "$PREPARE_EXIT" -ne 0 ] && exit 1   # fatal error
 
-# Read session dir from task-list.json (orchestrate prints it)
-SESSION_DIR=$(python3 -c "
-import glob, json, os
-files = sorted(glob.glob('.review/run-*/task-list.json'), key=os.path.getmtime, reverse=True)
-if files:
-    d = json.load(open(files[0]))
-    print(d['session_dir'])
-")
+SESSION_DIR=$(cat .review/last-session-dir 2>/dev/null)
+if [ -z "$SESSION_DIR" ]; then
+  echo "ERROR: session_dir not found (.review/last-session-dir missing)"
+  exit 1
+fi
 
 TASK_LIST=$(cat "$SESSION_DIR/task-list.json")
 TIER=$(echo "$TASK_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['tier'])")

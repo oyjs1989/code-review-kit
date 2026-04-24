@@ -56,7 +56,7 @@ def collect_diff(source_branch: str, base_branch: str, session_dir: str) -> dict
     (sd / 'gitlog.txt').write_text(log_result.stdout)
 
     diff_lines = len(diff_result.stdout.splitlines())
-    return {'diff_lines': diff_lines, 'files_changed': len(go_files), 'go_files': go_files}
+    return {'diff_lines': diff_lines, 'go_files_changed': len(go_files), 'go_files': go_files}
 
 
 # ── Step 2: Triage ───────────────────────────────────────────────────────────────
@@ -193,9 +193,9 @@ def phase_prepare(args) -> int:
 
     # Step 1: Collect diff
     meta = collect_diff(source_branch, base_branch, session_dir)
-    print(f'[1/3] diff={meta["diff_lines"]} lines, go_files={meta["files_changed"]}')
+    print(f'[1/3] diff={meta["diff_lines"]} lines, go_files={meta["go_files_changed"]}')
 
-    if meta['diff_lines'] == 0 and meta['files_changed'] == 0:
+    if meta['diff_lines'] == 0 and meta['go_files_changed'] == 0:
         print('ERROR: diff is empty', file=sys.stderr)
         return 1
 
@@ -204,7 +204,7 @@ def phase_prepare(args) -> int:
         return 1
 
     # Step 2: Triage
-    classification = triage(meta['diff_lines'], meta['files_changed'], session_dir)
+    classification = triage(meta['diff_lines'], meta['go_files_changed'], session_dir)
     tier = classification['tier']
     print(f'[2/3] tier={tier} ({classification.get("trigger_reason", "")})')
 
@@ -240,6 +240,8 @@ def phase_prepare(args) -> int:
     Path(session_dir, 'task-list.json').write_text(json.dumps(task_list, ensure_ascii=False, indent=2))
     print(f'[orchestrate] task-list.json written ({len(tasks)} agents)')
     print(f'[orchestrate] session_dir: {session_dir}')
+    # Write session dir to a stable path for workflow scripts to read
+    Path('.review/last-session-dir').write_text(session_dir)
     return 0
 
 
