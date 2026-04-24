@@ -38,7 +38,7 @@ def test_build_review_assumptions_full_tier():
     assert "FULL" in result
     assert "safety, data, quality" in result
     assert "12000" in result
-    assert "截断节：无" in result
+    assert "**截断节**: 无" in result
 
 
 def test_build_review_assumptions_with_truncation():

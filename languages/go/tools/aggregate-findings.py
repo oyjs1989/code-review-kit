@@ -467,7 +467,7 @@ def build_review_assumptions(classification: dict, context_meta: dict) -> str:
         f'- **规则来源**: {rules_source}',
         f'- **运行 Agents**: {", ".join(agents) if agents else "（无）"}',
         f'- **Token 估算**: {estimated} / {limit}',
-        f'- 截断节：{", ".join(truncated) if truncated else "无"}',
+        f'- **截断节**: {", ".join(truncated) if truncated else "无"}',
         '',
     ]
     return '\n'.join(lines)
@@ -610,12 +610,12 @@ def aggregate(
         try:
             classification = json.loads(Path(classification_file).read_text())
         except json.JSONDecodeError:
-            pass
+            print(f'WARN: failed to parse {classification_file}', file=sys.stderr)
     if context_meta_file and Path(context_meta_file).exists():
         try:
             context_meta = json.loads(Path(context_meta_file).read_text())
         except json.JSONDecodeError:
-            pass
+            print(f'WARN: failed to parse {context_meta_file}', file=sys.stderr)
     generate_report(
         findings, total_raw, total_after_dedup, total_filtered,
         max_output, output_file,
