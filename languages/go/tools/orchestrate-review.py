@@ -25,6 +25,61 @@ from pathlib import Path
 
 TOOLS_DIR = Path(__file__).parent
 
+# ── Per-agent context slicing ────────────────────────────────────────────────────
+# Entries ending with '-' are prefix patterns; others are exact rule IDs.
+_AGENT_RULE_FILTER: dict[str, tuple] = {
+    'safety':        ('SAFE-',),
+    'data':          ('DATA-',),
+    'quality':       ('QUAL-',),
+    'observability': ('OBS-',),
+    'naming':        ('QUAL-001', 'QUAL-008', 'QUAL-010'),  # subset of QUAL-*
+    'design':        (),
+    'business':      (),
+}
+
+# Top-level keys from diagnostics.json each agent needs; empty = none.
+_AGENT_DIAG_KEYS: dict[str, tuple] = {
+    'safety':        ('build_errors', 'gosec_issues'),
+    'data':          ('vet_issues',),
+    'quality':       ('vet_issues', 'staticcheck_issues'),
+    'observability': (),
+    'naming':        (),
+    'design':        (),
+    'business':      (),
+}
+
+
+def _filter_rule_hits_for_agent(agent: str, rule_hits_data: dict) -> dict:
+    """Return rule_hits_data with only hits relevant to agent."""
+    rule_filter = _AGENT_RULE_FILTER.get(agent)
+    if rule_filter is None:  # unknown agent → pass through
+        return rule_hits_data
+
+    hits = rule_hits_data.get('hits', [])
+    if not rule_filter:
+        filtered: list = []
+    else:
+        def _matches(rule_id: str) -> bool:
+            return any(
+                rule_id.startswith(f) if f.endswith('-') else rule_id == f
+                for f in rule_filter
+            )
+        filtered = [h for h in hits if _matches(h.get('rule_id', ''))]
+
+    counts: dict[str, int] = {}
+    for h in filtered:
+        sev = h.get('severity', 'P2')
+        counts[sev] = counts.get(sev, 0) + 1
+    return {'hits': filtered, 'summary': {'total': len(filtered), **counts}}
+
+
+def _filter_diags_for_agent(agent: str, diags_data: dict) -> dict:
+    """Return diags_data with only keys relevant to agent."""
+    keys = _AGENT_DIAG_KEYS.get(agent)
+    if keys is None:  # unknown agent → pass through
+        return diags_data
+    return {k: diags_data[k] for k in keys if k in diags_data}
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -132,8 +187,45 @@ def run_architecture_scan(go_files: list[str], session_dir: str) -> bool:
 # ── Step 4 Tier 1: Go tools ──────────────────────────────────────────────────────
 
 def run_tier1(go_files: list[str], session_dir: str) -> None:
-    """Run go build/vet/staticcheck via run-go-tools.sh."""
+    """Run Tier 1 scanning. Tries `codereview scan` (Python CLI) first, falls back to run-go-tools.sh."""
+    import shutil
+
     sd = Path(session_dir)
+
+    # Try codereview scan (Python CLI) — preferred path
+    if shutil.which('codereview'):
+        try:
+            scan_output_dir = sd / 'scanner-results'
+            scan_output_dir.mkdir(exist_ok=True)
+
+            project_root = subprocess.run(
+                ['git', 'rev-parse', '--show-toplevel'],
+                capture_output=True, text=True
+            ).stdout.strip() or '.'
+
+            subprocess.run(
+                ['codereview', 'scan', project_root, '--lang', 'go',
+                 '--output', str(scan_output_dir), '--no-install'],
+                capture_output=True, text=True, timeout=300
+            )
+
+            aggregated_files = sorted(scan_output_dir.glob('aggregated-*.json'), reverse=True)
+            if aggregated_files:
+                data = json.loads(aggregated_files[0].read_text())
+                issues = data.get('issues', [])
+                diagnostics = {
+                    'build_errors': [i for i in issues if i.get('tool') == 'go' and i.get('severity') == 'error'],
+                    'vet_issues': [i for i in issues if i.get('tool') == 'go' and i.get('severity') != 'error'],
+                    'staticcheck_issues': [i for i in issues if i.get('tool') == 'staticcheck'],
+                    'gosec_issues': [i for i in issues if i.get('tool') == 'gosec'],
+                }
+                (sd / 'diagnostics.json').write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+                print(f'[T1] codereview scan: {len(issues)} issues (build={len(diagnostics["build_errors"])}, vet={len(diagnostics["vet_issues"])}, static={len(diagnostics["staticcheck_issues"])}, sec={len(diagnostics["gosec_issues"])})')
+                return
+        except Exception as e:
+            print(f'[T1] codereview scan failed ({e}), falling back to run-go-tools.sh', file=sys.stderr)
+
+    # Fallback: run-go-tools.sh
     files_input = '\n'.join(go_files)
     result = subprocess.run(
         ['bash', str(TOOLS_DIR / 'run-go-tools.sh')],
@@ -160,14 +252,40 @@ def run_tier2(go_files: list[str], session_dir: str) -> None:
 def build_task_list(classification: dict, session_dir: str) -> list[dict]:
     """Build the list of AI agent tasks from classification."""
     agent_roster = classification.get('agent_roster', [])
+    sd = Path(session_dir)
+
+    # Load scan outputs once (files may not exist yet on error paths)
+    rule_hits_data: dict = {'hits': [], 'summary': {}}
+    diags_data: dict = {}
+    rh_path = sd / 'rule-hits.json'
+    diag_path = sd / 'diagnostics.json'
+    if rh_path.exists():
+        try:
+            rule_hits_data = json.loads(rh_path.read_text())
+        except json.JSONDecodeError:
+            pass
+    if diag_path.exists():
+        try:
+            diags_data = json.loads(diag_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
     tasks = []
     for agent in agent_roster:
+        sliced_rh = _filter_rule_hits_for_agent(agent, rule_hits_data)
+        sliced_diag = _filter_diags_for_agent(agent, diags_data)
+
+        rh_agent_path = sd / f'rule-hits-{agent}.json'
+        diag_agent_path = sd / f'diagnostics-{agent}.json'
+        rh_agent_path.write_text(json.dumps(sliced_rh, ensure_ascii=False, indent=2))
+        diag_agent_path.write_text(json.dumps(sliced_diag, ensure_ascii=False, indent=2))
+
         tasks.append({
             'agent': agent,
-            'context_file': str(Path(session_dir) / 'context-package.md'),
-            'rule_hits_file': str(Path(session_dir) / 'rule-hits.json'),
-            'diagnostics_file': str(Path(session_dir) / 'diagnostics.json'),
-            'output_file': str(Path(session_dir) / f'findings-{agent}.md'),
+            'context_file': str(sd / 'context-package.md'),
+            'rule_hits_file': str(rh_agent_path),
+            'diagnostics_file': str(diag_agent_path),
+            'output_file': str(sd / f'findings-{agent}.md'),
         })
     return tasks
 

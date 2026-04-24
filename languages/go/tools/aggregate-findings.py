@@ -138,14 +138,15 @@ LEGACY_SEV_RE = re.compile(r'\[(P[0-3])\]')
 RULE_ID_RE = re.compile(r'\b([A-Z]+-\d+)\b')
 
 
-def parse_findings_file(filepath: str, source_agent: str) -> list:
-    """Parse a findings Markdown file into Finding objects."""
+def parse_findings_file(filepath: str, source_agent: str) -> tuple:
+    """Parse a findings Markdown file into (Finding objects, malformed_count)."""
     try:
         text = Path(filepath).read_text(encoding='utf-8', errors='replace')
     except OSError:
-        return []
+        return [], 0
 
     findings = []
+    malformed = 0
     lines = text.splitlines()
     i = 0
 
@@ -200,6 +201,10 @@ def parse_findings_file(filepath: str, source_agent: str) -> list:
         # ── Legacy format: ### 问题 - [P0] ... ──
         if line.startswith('### ') and '[P' in line:
             sev_m = LEGACY_SEV_RE.search(line)
+            if not sev_m:
+                malformed += 1
+                i += 1
+                continue
             if sev_m:
                 severity = sev_m.group(1)
                 rule_ids = RULE_ID_RE.findall(line)
@@ -239,11 +244,13 @@ def parse_findings_file(filepath: str, source_agent: str) -> list:
                         body='\n'.join(body_lines), confidence=confidence,
                         needs_clarification=needs_clarification, source_agent=source_agent,
                     ))
+                else:
+                    malformed += 1  # legacy header with no extractable file:line
                 continue
 
         i += 1
 
-    return findings
+    return findings, malformed
 
 
 # ── Deduplication ───────────────────────────────────────────────────────────────
@@ -514,6 +521,7 @@ def generate_report(
     output_file: str,
     classification: dict | None = None,
     context_meta: dict | None = None,
+    total_malformed: int = 0,
 ) -> None:
     """Generate final Markdown review report with optional Appendix."""
     displayed = findings[:max_output]
@@ -540,6 +548,8 @@ def generate_report(
         lines.append(f'| P3（参考信息） | {counts["P3"]} 个 |')
     lines.append(f'| 合计（展示） | {len(displayed)} 个 |')
     lines.append(f'| 合计（过滤后） | {len(findings)} 个 |')
+    if total_malformed:
+        lines.append(f'| 格式错误（已跳过） | {total_malformed} 个 |')
     lines.append('')
 
     if total_raw > 0:
@@ -600,10 +610,14 @@ def aggregate(
 
     # Step 1: Parse all findings-*.md files
     all_raw: list = []
+    total_malformed = 0
     for md_file in sorted(findings_dir_path.glob('findings-*.md')):
         agent_name = md_file.stem[len('findings-'):]
-        parsed = parse_findings_file(str(md_file), agent_name)
+        parsed, malformed = parse_findings_file(str(md_file), agent_name)
         all_raw.extend(parsed)
+        total_malformed += malformed
+        if malformed:
+            print(f'WARN: {md_file.name} 有 {malformed} 条格式错误的 finding（已跳过）', file=sys.stderr)
 
     total_raw = len(all_raw)
 
@@ -662,6 +676,7 @@ def aggregate(
         max_output, output_file,
         classification=classification,
         context_meta=context_meta,
+        total_malformed=total_malformed,
     )
 
     # Terminal summary
@@ -670,7 +685,8 @@ def aggregate(
     for f in displayed:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
-    print(f'审查完成：{total_raw} 条原始 → 去重 {total_after_dedup} → 过滤 {total_filtered} 条')
+    malformed_note = f'，格式错误 {total_malformed}' if total_malformed else ''
+    print(f'审查完成：{total_raw} 条原始 → 去重 {total_after_dedup} → 过滤 {total_filtered} 条{malformed_note}')
     print(f'P0: {counts["P0"]}  P1: {counts["P1"]}  P2: {counts["P2"]}  P3: {counts.get("P3", 0)}')
     if len(findings) > max_output:
         extra = len(findings) - max_output
