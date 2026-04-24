@@ -75,23 +75,29 @@ echo "[4/6] 执行审查..."
 ### Tier 1 扫描
 
 ```bash
-if command -v golangci-lint > /dev/null 2>&1; then
-  FILES_LIST=$(cat "$SESSION_DIR/files.txt" | tr '\n' ' ')
-  golangci-lint run \
-    --output.json.path="$SESSION_DIR/lint-results.json" \
-    --config languages/go/tools/.golangci.yml \
-    $FILES_LIST 2>/dev/null || true
+# 优先使用 make lint-inc（fscan-toolchain），降级到 run-go-tools.sh
+LINT_OUTPUT="$SESSION_DIR/lint-results.txt"
+LINT_STDERR="$SESSION_DIR/lint-stderr.txt"
 
-  # 将 golangci-lint JSON 转换为 findings-lint.md
-  python3 languages/go/tools/aggregate-findings.py \
-    --lint-json "$SESSION_DIR/lint-results.json" \
-    --output "$SESSION_DIR/findings-lint.md" 2>/dev/null || true
-
-  echo "  ✓ golangci-lint 完成"
+if [ -f "Makefile" ] && grep -q 'lint-inc' Makefile; then
+  # 使用项目的 make lint-inc（fscan-toolchain）
+  # 输出格式：file:line:col: message（文本格式）
+  if make lint-inc > "$LINT_OUTPUT" 2>"$LINT_STDERR"; then
+    echo "  ✓ make lint-inc 完成"
+  else
+    LINT_EXIT=$?
+    # exit code 1 = 发现问题（正常），其他 = 运行错误
+    if [ "$LINT_EXIT" -eq 1 ] && [ -s "$LINT_OUTPUT" ]; then
+      echo "  ✓ make lint-inc 完成（发现问题）"
+    else
+      echo "  ⚠ make lint-inc 失败（exit=$LINT_EXIT）"
+      cat "$LINT_STDERR" >&2
+    fi
+  fi
 else
   # 降级：使用现有独立工具链
-  cat "$SESSION_DIR/files.txt" | bash languages/go/tools/run-go-tools.sh > "$SESSION_DIR/diagnostics.json" 2>/dev/null || true
-  echo "  ✓ go vet/build 完成（golangci-lint 未安装，使用降级路径）"
+  cat "$SESSION_DIR/files.txt" | bash languages/go/tools/run-go-tools.sh > "$SESSION_DIR/diagnostics.json" 2>&1 || true
+  echo "  ✓ go vet/build 完成（make lint-inc 不可用，使用降级路径）"
 fi
 
 # Tier 2 规则扫描（始终执行）

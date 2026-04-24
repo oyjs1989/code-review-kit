@@ -103,8 +103,14 @@ The Go skill (`languages/go/SKILL.md`) auto-classifies the diff and picks a revi
 
 For FULL reviews with large diffs (≥ 400 lines), the diff is split into batches to stay within token limits.
 
-golangci-lint is used when available. Fallback tools:
+Linting priority: `make lint-inc` (fscan-toolchain) > fallback tools.
 
+**Install fscan-toolchain (recommended):**
+```bash
+curl -sSL https://gitlab.futunn.com/fscan/fscan-toolchain/-/raw/main/install.sh | sh
+```
+
+**Fallback tools (if fscan-toolchain unavailable):**
 ```bash
 go install honnef.co/go/tools/cmd/staticcheck@latest
 go install github.com/uudashr/gocognit/cmd/gocognit@latest
@@ -116,7 +122,7 @@ go install github.com/gordonklaus/ineffassign@latest
 
 | Language | Status | Tools |
 |----------|--------|-------|
-| Go | Complete | golangci-lint (go build, go vet, staticcheck, gosec, gocognit) |
+| Go | Complete | fscan-toolchain (`make lint-inc`) or fallback (go build, go vet, staticcheck, gosec, gocognit) |
 | Python | Planned | pylint, mypy, flake8, ruff, bandit |
 | TypeScript | Planned | tsc, eslint |
 
