@@ -2018,15 +2018,24 @@ def install(
     console.print(f"[cyan]AI agent:[/cyan] {ai}")
     console.print()
 
-    # Locate the source languages/ directory (relative to this file)
-    # __file__ = .../src/review_cli/__init__.py
-    # languages/ = .../languages/
-    package_root = Path(__file__).parent.parent.parent
-    languages_src = package_root / "languages"
+    # Locate the source languages/ directory.
+    # Priority 1: bundled inside the installed package (pip install)
+    #   → review_cli/languages/ (via force-include in pyproject.toml)
+    # Priority 2: dev mode running from source repo
+    #   → <repo_root>/languages/
+    import importlib.resources
 
-    if not languages_src.exists():
-        console.print(f"[red]Error: languages/ directory not found at {languages_src}[/red]")
-        console.print("[yellow]Make sure code-review-kit is installed from source (not a wheel without data files).[/yellow]")
+    bundled = Path(importlib.resources.files("review_cli")) / "languages"
+    dev_mode = Path(__file__).parent.parent.parent / "languages"
+
+    if bundled.exists():
+        languages_src = bundled
+    elif dev_mode.exists():
+        languages_src = dev_mode
+    else:
+        console.print("[red]Error: languages/ directory not found.[/red]")
+        console.print(f"[dim]Checked: {bundled}[/dim]")
+        console.print(f"[dim]Checked: {dev_mode}[/dim]")
         raise typer.Exit(1)
 
     # Step 1: Copy language tools to .review/languages/ in target project

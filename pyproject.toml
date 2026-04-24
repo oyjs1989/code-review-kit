@@ -21,6 +21,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/review_cli"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"languages" = "review_cli/languages"
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",
