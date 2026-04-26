@@ -249,6 +249,21 @@ rules:
       bad: 'ResourceID string `gorm:"uniqueIndex:uniq_resource_user_host;column:resource_id"`'
       good: 'ResourceID string `gorm:"uniqueIndex:uk_resource_user_host;column:resource_id"`'
 
+  # 规则说明: 云接口/外部 API 要求的 JSON 字符串只应在适配层（adapter/gateway）做序列化/反序列化
+  #          内部函数调用必须传递 Go 原生类型，禁止将 JSON 字符串透传到业务逻辑层
+  #          例外：多态子结构场景（运行时才能确定具体类型）可使用 json.RawMessage，但禁止用 string
+  # NOTE: 通过检测参数名含 JSON/Json 且类型为 string 来识别，误报率中等，agent 需确认是否为非适配层代码
+  - id: DATA-022
+    name: 禁止将 JSON 字符串透传到内部函数
+    severity: P1
+    pattern:
+      type: regex
+      match: 'func [A-Za-z]\w*\([^)]*\b\w*[Jj][Ss][Oo][Nn]\w*\s+string\b'
+    message: "内部函数禁止以 string 类型接收 JSON 序列化数据（如 itemsJSON string、bodyJson string）。JSON 的序列化/反序列化只应发生在系统边界（适配层/gateway），内部调用必须使用 Go 原生结构（如 []int、[]Item、*Config）。透传 JSON 字符串会导致：① 类型安全丧失，编译器无法校验内容；② 调用方序列化、被调方再反序列化，冗余往返；③ 单元测试必须构造 JSON 字符串而非直接传结构体。例外：真正的多态子结构（运行时才能确定具体类型）可使用 json.RawMessage，不得使用 string。"
+    examples:
+      bad: "// 内部 service 方法接收 JSON 字符串\nfunc (s *Service) UpdateConfig(configJSON string) error {\n    var cfg Config\n    json.Unmarshal([]byte(configJSON), &cfg)\n    // ...\n}\n// 调用方必须预先序列化\ndata, _ := json.Marshal(cfg)\nsvc.UpdateConfig(string(data))"
+      good: "// 内部函数使用原生类型\nfunc (s *Service) UpdateConfig(cfg *Config) error {\n    // ...\n}\n// 适配层（handler/gateway）负责 JSON 解析，仅此一处\nfunc (h *Handler) handleRequest(body []byte) error {\n    var cfg Config\n    if err := json.Unmarshal(body, &cfg); err != nil {\n        return err\n    }\n    return h.svc.UpdateConfig(&cfg)\n}"
+
   # 规则说明: Go 1.20+ 提供 time.DateTime 等标准常量，应避免硬编码时间格式字符串
   - id: DATA-021
     name: 使用 time.DateTime 标准常量替代硬编码时间格式字符串

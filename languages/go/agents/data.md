@@ -113,6 +113,7 @@ tools: ["Read", "Grep", "Glob"]
 | DATA-008 | storage struct 有 omitempty | 确认该 struct 是否确实用于存储（而非 DTO/API 响应） |
 | DATA-009 | Update/Delete 无 id 条件（需上下文） | 确认是否真的缺少条件，还是条件在 WHERE 中传入 |
 | DATA-010 | 循环中批量操作（需上下文确认） | 确认是否确实是可批量合并的操作 |
+| DATA-022 | JSON 字符串透传到内部函数 | 确认该函数是否为内部业务逻辑（而非 adapter/gateway 适配层）；参数名含 JSON 且类型为 string 才报告，若函数本身就是对外接口的解析入口则豁免 |
 
 确认步骤：
 - 确认命中是否为真阳性（排除误报）
@@ -182,6 +183,43 @@ type UserDTO struct {
 - 用于 GORM 操作的 struct 是否混入了 `json` tag
 - `omitempty` 是否出现在存储 struct 上（零值可能是合法业务值，omitempty 会导致存储遗漏）
 - DTO 和 DO 是否有清晰的分离
+
+### 2.1 JSON 字符串透传（序列化边界违反）
+
+内部函数禁止以 `string` 类型接收 JSON 序列化数据并透传到业务逻辑层。JSON 只应在适配层（adapter/gateway/handler）做一次序列化/反序列化，内部调用传递 Go 原生结构。
+
+```go
+// 反例：JSON 字符串透传到 service 层
+func (s *Service) UpdatePermissions(permListJSON string) error {
+    var perms []int64
+    json.Unmarshal([]byte(permListJSON), &perms) // service 层不应该做这件事
+    // ...
+}
+
+// 调用方被迫预先序列化
+data, _ := json.Marshal([]int64{1, 2, 3})
+svc.UpdatePermissions(string(data))
+
+// 正例：service 接收原生类型，适配层负责解析
+func (s *Service) UpdatePermissions(perms []int64) error {
+    // 直接使用，无需反序列化
+}
+
+// adapter/handler 层：系统边界，唯一做 JSON 解析的地方
+func (h *Handler) handleUpdate(body []byte) error {
+    var req UpdateRequest
+    if err := json.Unmarshal(body, &req); err != nil {
+        return err
+    }
+    return h.svc.UpdatePermissions(req.Permissions)
+}
+```
+
+**检查点**：
+- 函数参数是否有 `string` 类型且参数名含 `JSON`/`Json`（Tier 2 已检测，需确认是否为非适配层）
+- 函数体内是否对 `string` 参数做 `json.Unmarshal([]byte(param), ...)`（即使参数名不含 JSON 也是反模式）
+- 调用处是否有 `json.Marshal(...)` 后立即 `string(...)` 传给内部函数的模式
+- **例外**：真正的多态子结构场景（运行时才能确定具体类型），应使用 `json.RawMessage` 而非 `string`
 
 ### 3. 类型语义合理性
 
