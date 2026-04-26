@@ -1,0 +1,38 @@
+rules:
+  # Rob Pike Go Proverbs - https://go-proverbs.github.io/
+
+  # 规则说明: unsafe 包绕过 Go 类型系统，Go 兼容性保证对 unsafe 不适用
+  - id: PIKE-001
+    name: 禁止在业务代码中导入 unsafe 包
+    severity: P1
+    pattern:
+      type: regex
+      match: '"unsafe"'
+    message: 'unsafe 包绕过类型系统，Go 官方兼容性保证对使用 unsafe 的程序不适用。业务代码不应依赖 unsafe。(Pike: "With the unsafe package there are no guarantees.")'
+    examples:
+      bad: 'import "unsafe"'
+      good: '// 使用类型安全的 API 替代；若确有必要在底层库中使用，添加 //nolint:unsafe 并说明原因'
+
+  # 规则说明: interface{}/any 作为函数参数或返回值丢失类型信息，迫使调用方做不安全断言
+  - id: PIKE-002
+    name: 函数签名中避免使用 interface{}/any
+    severity: P2
+    pattern:
+      type: regex
+      match: '\binterface\{\}'
+    message: 'interface{} 丢失所有类型信息，迫使调用方做 type assertion，放弃编译时类型安全。优先使用具体类型或泛型参数。(Pike: "interface{} says nothing.")'
+    examples:
+      bad: 'func Process(data interface{}) interface{}'
+      good: 'func Process[T any](data T) T  // 或使用具体类型'
+
+  # 规则说明: 导出函数的 channel 参数应指定方向，防止调用方误用
+  - id: PIKE-003
+    name: 导出函数的 channel 参数应声明方向
+    severity: P2
+    pattern:
+      type: regex
+      match: 'func [A-Z][A-Za-z0-9]*\([^)]*\bchan [A-Za-z]'
+    message: 'channel 参数应使用方向限定符：<-chan T（只读）或 chan<- T（只写），防止调用方误用并提供编译时安全保障。(Pike: "Channels orchestrate; mutexes serialize.")'
+    examples:
+      bad: 'func Publish(ch chan Event) { ch <- event }'
+      good: 'func Publish(ch chan<- Event) { ch <- event }'

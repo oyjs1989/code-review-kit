@@ -48,6 +48,7 @@ CATEGORY_PREFIX_MAP = {
     'business': ['BIZ-'],
     'naming': ['QUAL-'],
     'lint': ['LINT-'],
+    'pike': ['PIKE-'],
 }
 
 # Linter → (rule_id, default_severity) mapping for golangci-lint JSON
@@ -434,6 +435,38 @@ def auto_verify(findings: list, rule_hits: dict) -> None:
                 f.confidence = 1.0
         elif any(f.rule_id.startswith(p) for p in SAFE_DATA_PREFIXES):
             f.confidence = max(0.0, f.confidence - VERIFY_DOWNGRADE_AMOUNT)
+
+
+# ── Coverage gap detection ──────────────────────────────────────────────────────
+
+def detect_coverage_gaps(findings_dir: str, expected_files: list[str]) -> list[str]:
+    """
+    Parse [已读取] markers from all findings-*.md files.
+    Return list of expected .go files NOT mentioned by any agent.
+
+    Agents are required to emit:
+        [已读取] path/to/file.go L1-L100
+    after every Read tool call. This function uses those markers to verify
+    that every file in the review scope was actually read by at least one agent.
+    """
+    read_pattern = re.compile(r'\[已读取\]\s+(\S+\.go)')
+    covered: set[str] = set()
+
+    for md_file in Path(findings_dir).glob('findings-*.md'):
+        try:
+            text = md_file.read_text(errors='ignore')
+        except OSError:
+            continue
+        for match in read_pattern.finditer(text):
+            # Normalize: use basename for matching so relative path differences
+            # between the marker and the expected_files list don't cause false gaps.
+            covered.add(Path(match.group(1)).name)
+
+    gaps = []
+    for f in expected_files:
+        if Path(f).name not in covered:
+            gaps.append(f)
+    return gaps
 
 
 # ── golangci-lint JSON conversion ───────────────────────────────────────────────

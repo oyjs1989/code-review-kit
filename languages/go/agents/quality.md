@@ -435,6 +435,45 @@ type User struct {
 - 包级别函数/类型名是否包含了包名（`utils.StringUtils` → `utils.Format`）
 - 方法名是否包含了接收者类型名（`file.FileClose()` → `file.Close()`）
 
+### 9. 具名返回值 + 裸 return（Pike: "Clear is better than clever"）
+
+在超过 15 行的函数中，若同时使用具名返回值（named return values）和裸 `return`，会隐藏返回路径，显著降低代码可读性。读者必须追踪每个具名变量的状态才能理解函数的实际输出。
+
+```go
+// 反例：具名返回值 + 裸 return，隐藏了实际返回内容
+func getUserWithCache(ctx context.Context, id int64) (user *User, err error) {
+    if cached, ok := cache.Get(id); ok {
+        user = cached.(*User)
+        return // ← 裸 return：返回了 user=cached, err=nil，但读者必须回头找 user 的赋值
+    }
+    user, err = db.GetUser(ctx, id)
+    if err != nil {
+        return // ← 裸 return：返回了 user=nil, err=db error
+    }
+    cache.Set(id, user)
+    return // ← 裸 return：返回了 user=dbUser, err=nil
+}
+
+// 正例：显式 return，每条路径意图清晰
+func getUserWithCache(ctx context.Context, id int64) (*User, error) {
+    if cached, ok := cache.Get(id); ok {
+        return cached.(*User), nil
+    }
+    user, err := db.GetUser(ctx, id)
+    if err != nil {
+        return nil, errors.Wrap(err, "db get user")
+    }
+    cache.Set(id, user)
+    return user, nil
+}
+```
+
+**检查点**：
+- 函数签名是否声明了具名返回值（`func Foo() (result T, err error)`）
+- 函数体内是否出现裸 `return`（无参数的 return 语句）
+- 仅在函数超过 15 行且存在多条裸 return 路径时报告为 P2（短小函数的具名返回可接受）
+- `defer` 中修改具名返回值的场景（如错误装饰）是刻意使用，不属于此检查范围
+
 ## 输出格式
 
 **重要**: 所有问题描述和建议必须使用中文输出。

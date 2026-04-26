@@ -397,6 +397,29 @@ def phase_aggregate(args) -> int:
         return 1
 
     print(f'[orchestrate] report: {output_file}')
+
+    # Coverage check: detect .go files not mentioned in any agent findings
+    files_txt = sd / 'files.txt'
+    if files_txt.exists():
+        expected_files = [f for f in files_txt.read_text().splitlines() if f.strip()]
+        if expected_files:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'aggregate_findings', TOOLS_DIR / 'aggregate-findings.py'
+            )
+            agg_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(agg_mod)
+            gaps = agg_mod.detect_coverage_gaps(str(sd), expected_files)
+            if gaps:
+                gaps_path = sd / 'coverage-gaps.json'
+                gaps_path.write_text(json.dumps({'uncovered_files': gaps}, ensure_ascii=False, indent=2))
+                print(f'[orchestrate] ⚠ {len(gaps)} 个文件未被任何 agent 读取：')
+                for f in gaps:
+                    print(f'[orchestrate]   - {f}')
+                print('[orchestrate] coverage-gaps.json 已写入，可针对缺漏文件补充审查')
+            else:
+                print('[orchestrate] ✓ 所有变更文件均已覆盖')
+
     return 0
 
 

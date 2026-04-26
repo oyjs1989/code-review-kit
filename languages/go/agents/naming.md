@@ -223,6 +223,9 @@ package httputil    // Go 标准库风格的工具包
 - 简短、有意义的名词（避免 `util`、`common`、`misc`、`base`）
 - 使用时不应重复信息：`http.Client` 而非 `http.HTTPClient`
 
+**Pike 原则——技术层命名反模式（P1）**：
+`utils`、`helpers`、`common`、`base`、`models`、`types`、`interfaces`、`misc` 是明确的反模式。这类包名描述的是技术层，而非领域能力。包名应描述服务或领域（`payment`、`inventory`、`ratelimit`、`auth`），而不是代码所在的技术层级。若在 PR 中发现这类包名，应标记为 P1 并要求改为领域化名称。(Pike: "Design the architecture, name the components, document the details.")
+
 ### 5. 命名一致性
 
 同一个业务概念在不同位置应使用相同的名称。

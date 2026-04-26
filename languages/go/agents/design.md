@@ -942,6 +942,81 @@ func Update(key Key, isMerge bool, ...) error {
 - 顶层流程代码与实现细节混在同一缩进层次（读者必须"掉入"细节才能理解全貌）
 - 函数参数列表随业务增长不断追加（超过 5 个参数通常意味着需要重构为结构体参数）
 
+---
+
+## Rob Pike 设计原则补充检查
+
+### 原则 11：零值可用性（Make the Zero Value Useful）
+
+Go 类型应尽量设计为零值即可用，无需强制调用构造函数。`sync.Mutex`、`bytes.Buffer`、`sync.WaitGroup` 均是正确范例——声明后直接使用，无需初始化。
+
+```go
+// 反例：构造函数仅做字段赋值，零值本可直接使用
+type RateLimiter struct {
+    limit int
+    mu    sync.Mutex
+}
+
+func NewRateLimiter(limit int) *RateLimiter {
+    return &RateLimiter{limit: limit} // 纯赋值，零值同样安全
+}
+
+// 正例：提供有意义的零值语义
+type RateLimiter struct {
+    limit int // 0 表示不限速，调用方通过字段赋值配置
+    mu    sync.Mutex
+}
+// 用法：var rl RateLimiter; rl.limit = 100
+```
+
+**检查点**：
+- `New*()` 构造函数体内是否只做字段赋值，而无任何计算、IO 或验证？若是，零值设计是否更合适
+- 类型文档是否说明了零值语义（零值代表什么状态？是否安全可用？）
+- 若零值不可用（必须调用构造函数），是否在类型注释中明确说明
+
+(Pike: "Make the zero value useful.")
+
+### 原则 12：裸 error 透传（Don't Just Check Errors）
+
+在错误传播链中，若函数仅将上游 error 原样 `return err` 而不附加任何上下文，则调用链出错时无法定位根因。错误在哪一层产生、对应哪个业务操作，对凌晨排障极为关键。
+
+```go
+// 反例：裸透传，丢失上下文
+func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
+    user, err := s.userRepo.GetByID(ctx, req.UserID)
+    if err != nil {
+        return nil, err // 调用方只能看到原始 DB 错误，不知道在哪个步骤失败
+    }
+    order, err := s.orderRepo.Create(ctx, buildOrder(req, user))
+    if err != nil {
+        return nil, err // 同上
+    }
+    return order, nil
+}
+
+// 正例：每层附加上下文
+func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
+    user, err := s.userRepo.GetByID(ctx, req.UserID)
+    if err != nil {
+        return nil, errors.Wrapf(err, "get user for order creation: user_id=%d", req.UserID)
+    }
+    order, err := s.orderRepo.Create(ctx, buildOrder(req, user))
+    if err != nil {
+        return nil, errors.Wrap(err, "create order record")
+    }
+    return order, nil
+}
+```
+
+**检查点**：
+- `return nil, err` 或 `return err` 出现在非直接产生 error 的位置（即 err 来自上游调用），应补充 `errors.Wrap/Wrapf` 上下文
+- 注意区分：repository 层最内层直接 `return err` 可以接受，但 service 层、handler 层必须附加上下文
+- 同一函数中多个 `return nil, err` 模式，每处都应有区分性的上下文信息
+
+(Pike: "Don't just check errors, handle them gracefully." / "Errors are values.")
+
+---
+
 ## 输出格式
 
 **重要**: 所有问题描述和建议必须使用中文输出。
