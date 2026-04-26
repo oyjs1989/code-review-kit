@@ -460,7 +460,14 @@ def phase_prepare(args) -> int:
     assemble_exit = assemble_context(classification, session_dir)
     if assemble_exit == 2:
         print('[3/3] WARNING: context truncated (change_set exceeds token limit)')
-    print(f'[3/3] context package assembled (exit={assemble_exit})')
+        if tier == 'LITE':
+            tier = 'FULL'
+            classification['tier'] = 'FULL'
+            classification['agent_roster'] = [
+                'safety', 'data', 'design', 'quality', 'observability', 'business', 'naming'
+            ]
+            print('[3/3] tier upgraded LITE → FULL (token budget exceeded, full review warranted)')
+    print(f'[3/3] context package assembled (tier={tier}, exit={assemble_exit})')
 
     # Step 3.5: Architecture scan (FULL only)
     if tier == 'FULL':
