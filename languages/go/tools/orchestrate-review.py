@@ -93,6 +93,102 @@ def run(cmd: list[str], input_text: str | None = None, check: bool = True) -> su
     return subprocess.run(cmd, input=input_text, capture_output=True, text=True, check=check)
 
 
+def is_git_repo(path: str = '.') -> bool:
+    """Return True if path is inside a git repository."""
+    result = subprocess.run(
+        ['git', '-C', str(path), 'rev-parse', '--git-dir'],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0
+
+
+def find_workspace_repos(workspace_dir: str) -> list[Path]:
+    """Return immediate subdirectories of workspace_dir that contain a .git directory."""
+    repos = []
+    for child in sorted(Path(workspace_dir).iterdir()):
+        if child.is_dir() and (child / '.git').is_dir():
+            repos.append(child)
+    return repos
+
+
+def collect_diff_workspace(repos: list[Path], branch: str, base_branch: str, session_dir: str) -> dict:
+    """Collect and merge diffs from multiple git repos in a Go workspace."""
+    sd = ensure_session_dir(session_dir)
+    combined_diff_parts: list[str] = []
+    all_go_files: list[str] = []
+    log_parts: list[str] = []
+
+    for repo in repos:
+        repo_name = repo.name
+
+        # Determine source branch for this repo
+        if branch:
+            src = branch
+            check = subprocess.run(
+                ['git', '-C', str(repo), 'rev-parse', '--verify', src],
+                capture_output=True, text=True
+            )
+            if check.returncode != 0:
+                print(f'[workspace] {repo_name}: branch {src!r} not found, skipping', file=sys.stderr)
+                continue
+        else:
+            src = subprocess.run(
+                ['git', '-C', str(repo), 'branch', '--show-current'],
+                capture_output=True, text=True
+            ).stdout.strip()
+            if not src:
+                print(f'[workspace] {repo_name}: detached HEAD, skipping', file=sys.stderr)
+                continue
+
+        # Skip repos whose source branch equals base (nothing to diff)
+        check_base = subprocess.run(
+            ['git', '-C', str(repo), 'rev-parse', '--verify', base_branch],
+            capture_output=True, text=True
+        )
+        if check_base.returncode != 0:
+            print(f'[workspace] {repo_name}: base branch {base_branch!r} not found, skipping', file=sys.stderr)
+            continue
+
+        diff_result = subprocess.run(
+            ['git', '-C', str(repo), 'diff', f'{base_branch}...{src}', '--diff-filter=AM'],
+            capture_output=True, text=True
+        )
+        files_result = subprocess.run(
+            ['git', '-C', str(repo), 'diff', f'{base_branch}...{src}',
+             '--name-only', '--diff-filter=AM'],
+            capture_output=True, text=True
+        )
+        log_result = subprocess.run(
+            ['git', '-C', str(repo), 'log', '--oneline', '-5', f'{base_branch}..{src}'],
+            capture_output=True, text=True
+        )
+
+        if diff_result.stdout:
+            combined_diff_parts.append(f'# === {repo_name} (branch: {src}) ===\n')
+            combined_diff_parts.append(diff_result.stdout)
+
+        for f in files_result.stdout.splitlines():
+            if f.endswith('.go'):
+                all_go_files.append(f'{repo_name}/{f}')
+
+        if log_result.stdout:
+            log_parts.append(f'# {repo_name}:\n{log_result.stdout}')
+
+        repo_go_count = len([f for f in files_result.stdout.splitlines() if f.endswith('.go')])
+        print(f'[workspace] {repo_name}: src={src}, go_files={repo_go_count}')
+
+    combined_diff = ''.join(combined_diff_parts)
+    (sd / 'diff.txt').write_text(combined_diff)
+    (sd / 'files.txt').write_text('\n'.join(all_go_files) + ('\n' if all_go_files else ''))
+    (sd / 'gitlog.txt').write_text('\n'.join(log_parts))
+
+    return {
+        'diff_lines': len(combined_diff.splitlines()),
+        'go_files_changed': len(all_go_files),
+        'go_files': all_go_files,
+    }
+
+
 # ── Step 1: Collect diff ─────────────────────────────────────────────────────────
 
 def collect_diff(source_branch: str, base_branch: str, session_dir: str) -> dict:
@@ -293,24 +389,54 @@ def build_task_list(classification: dict, session_dir: str) -> list[dict]:
 # ── Phase: prepare ───────────────────────────────────────────────────────────────
 
 def phase_prepare(args) -> int:
-    source_branch = args.branch or run(['git', 'branch', '--show-current'], check=False).stdout.strip()
     base_branch = args.base
 
-    if not source_branch:
-        print('ERROR: could not determine source branch', file=sys.stderr)
-        return 1
+    # ── Detect Go workspace (directory is not itself a git repo) ─────────────────
+    if not is_git_repo('.'):
+        if not Path('go.work').exists():
+            print('ERROR: not a git repo and no go.work found', file=sys.stderr)
+            return 1
+        repos = find_workspace_repos('.')
+        if not repos:
+            print('ERROR: no git repos found in Go workspace', file=sys.stderr)
+            return 1
+        print(f'[orchestrate] Go workspace detected ({len(repos)} repos): {", ".join(r.name for r in repos)}')
 
-    # Resolve session dir
-    if args.session_dir:
-        session_dir = args.session_dir
+        if args.session_dir:
+            session_dir = args.session_dir
+        else:
+            import hashlib
+            heads = []
+            for repo in repos:
+                h = subprocess.run(
+                    ['git', '-C', str(repo), 'rev-parse', 'HEAD'],
+                    capture_output=True, text=True
+                ).stdout.strip()[:8]
+                if h:
+                    heads.append(h)
+            combined_hash = hashlib.md5(''.join(heads).encode()).hexdigest()[:8]
+            session_dir = f'.review/run-ws-{combined_hash}-{os.getpid()}'
+
+        print(f'[orchestrate] session_dir={session_dir}')
+        meta = collect_diff_workspace(repos, args.branch, base_branch, session_dir)
+
+    # ── Single-repo (original) path ───────────────────────────────────────────────
     else:
-        head_sha = run(['git', 'rev-parse', source_branch], check=False).stdout.strip()[:8]
-        session_dir = f'.review/run-{head_sha}-{os.getpid()}'
+        source_branch = args.branch or run(['git', 'branch', '--show-current'], check=False).stdout.strip()
 
-    print(f'[orchestrate] session_dir={session_dir}')
+        if not source_branch:
+            print('ERROR: could not determine source branch', file=sys.stderr)
+            return 1
 
-    # Step 1: Collect diff
-    meta = collect_diff(source_branch, base_branch, session_dir)
+        if args.session_dir:
+            session_dir = args.session_dir
+        else:
+            head_sha = run(['git', 'rev-parse', source_branch], check=False).stdout.strip()[:8]
+            session_dir = f'.review/run-{head_sha}-{os.getpid()}'
+
+        print(f'[orchestrate] session_dir={session_dir}')
+        meta = collect_diff(source_branch, base_branch, session_dir)
+
     print(f'[1/3] diff={meta["diff_lines"]} lines, go_files={meta["go_files_changed"]}')
 
     if meta['diff_lines'] == 0 and meta['go_files_changed'] == 0:
