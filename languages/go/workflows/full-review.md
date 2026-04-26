@@ -4,7 +4,7 @@
 >
 > **关键约束**：
 > - `SESSION_DIR` 和 `$$` PID 在此文件中定义，不在路由器中
-> - `ASSEMBLE_EXIT=2` 触发 `FORCE_LOOP=true`（保持 FULL 档，分批处理），逻辑在 Step 3 中
+> - `loop_mode` 由 `orchestrate-review.py` 在 prepare 阶段写入 `task-list.json`，workflow 直接读取，不再重新推导
 > - `AGENT_ROSTER` 从 `classification.json` 读取，不硬编码
 > - 输出格式见 `templates/report.md`；Context Package 格式见 `templates/context-package.md`
 
@@ -52,8 +52,9 @@ fi
 
 TASK_LIST=$(cat "$SESSION_DIR/task-list.json")
 TIER=$(echo "$TASK_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['tier'])")
+LOOP_MODE=$(echo "$TASK_LIST" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('loop_mode', False)).lower())")
 AGENT_ROSTER=$(echo "$TASK_LIST" | python3 -c "import sys,json; print(' '.join(t['agent'] for t in json.load(sys.stdin)['tasks']))")
-echo "✓ 准备完成：tier=$TIER，agents=$AGENT_ROSTER"
+echo "✓ 准备完成：tier=$TIER，loop_mode=$LOOP_MODE，agents=$AGENT_ROSTER"
 ```
 
 ---
@@ -107,16 +108,12 @@ echo "  ✓ Tier 2 规则扫描完成"
 
 ### Loop 模式判断
 
+`loop_mode` 已由 `orchestrate-review.py` 在准备阶段写入 `task-list.json`，此处直接读取，无需重新推导。
+
 ```bash
-if { [ "$TIER" = "FULL" ] && [ "$DIFF_LINES" -ge 400 ]; } || [ "$FORCE_LOOP" = "true" ]; then
-  LOOP_MODE=true
-  if [ "$FORCE_LOOP" = "true" ]; then
-    echo "  → Loop 模式（Change Set 超出 token 上限，强制分批）"
-  else
-    echo "  → Loop 模式（diff_lines=$DIFF_LINES >= 400）"
-  fi
-else
-  LOOP_MODE=false
+# LOOP_MODE 已在上方从 task-list.json 读取（true/false）
+if [ "$LOOP_MODE" = "true" ]; then
+  echo "  → Loop 模式（由 orchestrate-review.py 决策，见 task-list.json）"
 fi
 ```
 

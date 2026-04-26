@@ -347,10 +347,16 @@ def phase_prepare(args) -> int:
     run_tier2(meta['go_files'], session_dir)
     print('[T2] rule scan complete')
 
+    # Determine loop_mode deterministically (not left to the workflow Claude agent)
+    loop_mode = (tier == 'FULL' and meta['diff_lines'] >= 400) or (assemble_exit == 2)
+    if loop_mode:
+        print(f'[orchestrate] loop_mode=true (diff_lines={meta["diff_lines"]}, assemble_exit={assemble_exit})')
+
     # Write task list
     tasks = build_task_list(classification, session_dir)
     task_list = {
         'tier': tier,
+        'loop_mode': loop_mode,
         'session_dir': session_dir,
         'tasks': tasks,
         'status': 'ready',
